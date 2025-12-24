@@ -17,6 +17,10 @@ _BOOK_SET_RE = re.compile(
     rf"^- \[(?P<uid>{_ID})\] step=(?P<step>\d+) SET (?P<key>tag\.\d{{2}}) = (?P<value>.+)$"
 )
 _BOOK_CLEAR_RE = re.compile(rf"^- \[(?P<uid>{_ID})\] step=(?P<step>\d+) CLEAR (?P<key>tag\.\d{{2}})$")
+_BOOK_TITLE_RE = re.compile(r"^# .+")
+_BOOK_GLOSSARY_RE = re.compile(r"^- (tag\.\d{2}): .+")
+_BOOK_CHAPTER_RE = re.compile(r"^## Chapter \d+$")
+_BOOK_RULE_RE = re.compile(r"^- .+")
 
 
 def _iter_lines(document: str) -> Iterator[str]:
@@ -101,10 +105,190 @@ def parse_book_ledger(book: str) -> list[dict[str, Any]]:
     return entries
 
 
+def validate_book_artifact(book: str) -> dict[str, Any]:
+    """
+    Structural validation for book artifacts. Ensures allowed sections and line grammars.
+    """
+    lines = list(_iter_lines(book))
+    errors: list[str] = []
+    idx = 0
+
+    def skip_blank(i: int) -> int:
+        while i < len(lines) and lines[i].strip() == "":
+            i += 1
+        return i
+
+    idx = skip_blank(idx)
+    if idx >= len(lines) or not _BOOK_TITLE_RE.match(lines[idx]):
+        errors.append("missing_or_invalid_title")
+        return {"ok": False, "errors": errors}
+    idx += 1
+
+    idx = skip_blank(idx)
+    if idx >= len(lines) or lines[idx].strip() != "## Reading Rules":
+        errors.append("missing_reading_rules")
+        return {"ok": False, "errors": errors}
+    idx += 1
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("## "):
+            break
+        if line.strip() and not _BOOK_RULE_RE.match(line):
+            errors.append("invalid_reading_rule")
+            break
+        idx += 1
+
+    idx = skip_blank(idx)
+    if idx >= len(lines) or lines[idx].strip() != "## Glossary (Tags)":
+        errors.append("missing_glossary")
+        return {"ok": False, "errors": errors}
+    idx += 1
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("## "):
+            break
+        if line.strip() and not _BOOK_GLOSSARY_RE.match(line):
+            errors.append("invalid_glossary_line")
+            break
+        idx += 1
+
+    idx = skip_blank(idx)
+    saw_chapter = False
+    while idx < len(lines):
+        line = lines[idx]
+        if line.strip() == "## State Ledger":
+            break
+        if _BOOK_CHAPTER_RE.match(line):
+            saw_chapter = True
+            idx += 1
+            continue
+        if line.strip() == "## Episode Log":
+            errors.append("episode_log_leak")
+            break
+        if _UPDATE_SET_RE.match(line) or _UPDATE_CLEAR_RE.match(line):
+            errors.append("update_line_leak")
+            break
+        idx += 1
+
+    if not saw_chapter:
+        errors.append("missing_chapters")
+
+    idx = skip_blank(idx)
+    if idx >= len(lines) or lines[idx].strip() != "## State Ledger":
+        errors.append("missing_state_ledger")
+        return {"ok": False, "errors": errors}
+    idx += 1
+    while idx < len(lines):
+        line = lines[idx]
+        if line.strip() == "":
+            idx += 1
+            continue
+        if line.startswith("## "):
+            errors.append("unexpected_section_after_ledger")
+            break
+        if not (_BOOK_SET_RE.match(line) or _BOOK_CLEAR_RE.match(line)):
+            errors.append("invalid_ledger_line")
+            break
+        idx += 1
+
+    return {"ok": not errors, "errors": errors}
+
+
+def _parse_value(state_mode: str, raw: str | None) -> Any:
+    if raw is None:
+        return None
+    if state_mode == "counter":
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    if state_mode == "set":
+        return set(raw.split(",")) if raw else set()
+    return raw
+
+
+def _format_value(state_mode: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if state_mode == "set":
+        if not value:
+            return None
+        return ",".join(sorted(value))
+    return str(value)
+
+
+def _apply_updates(
+    state_mode: str, entries: list[dict[str, Any]]
+) -> tuple[dict[str, Any], dict[str, str | None], dict[str, str]]:
+    state: dict[str, Any] = {}
+    last_support: dict[str, str | None] = {}
+    last_op: dict[str, str] = {}
+    for e in entries:
+        key = e["key"]
+        if e["op"] == "SET":
+            state[key] = _parse_value(state_mode, e["value"])
+        else:
+            state[key] = set() if state_mode == "set" else None
+        last_support[key] = e["uid"]
+        last_op[key] = e["op"]
+    return state, last_support, last_op
+
+
+def _answer_from_state(
+    row: dict[str, Any],
+    state: dict[str, Any],
+    last_support: dict[str, str | None],
+    last_op: dict[str, str],
+) -> dict[str, Any]:
+    state_mode = row.get("meta", {}).get("state_mode", "kv")
+    key = row.get("meta", {}).get("key")
+    query_type = row.get("meta", {}).get("query_type", "direct")
+    derived_op = row.get("meta", {}).get("derived_op")
+
+    value: str | None = None
+    support_ids: list[str] = []
+
+    if query_type == "derived" and derived_op:
+        if derived_op == "color":
+            raw = _format_value(state_mode, state.get(key))
+            value = raw.split("-", 1)[0] if raw else None
+            if last_support.get(key):
+                support_ids = [last_support[key]]  # type: ignore[index]
+        elif derived_op == "parity":
+            raw = state.get(key)
+            if raw is not None:
+                value = "even" if int(raw) % 2 == 0 else "odd"
+                if last_support.get(key):
+                    support_ids = [last_support[key]]  # type: ignore[index]
+        elif derived_op == "count":
+            raw = state.get(key)
+            if last_support.get(key):
+                support_ids = [last_support[key]]  # type: ignore[index]
+            if raw is None or last_op.get(key) == "CLEAR":
+                value = None
+            else:
+                value = str(len(raw)) if isinstance(raw, set) else None
+        elif derived_op == "reports":
+            manager = row.get("meta", {}).get("derived_manager")
+            if manager:
+                report_keys = sorted([k for k, v in state.items() if v == manager])
+                if report_keys:
+                    value = ",".join(report_keys)
+                    support_ids = [last_support[k] for k in report_keys if last_support.get(k)]
+    else:
+        value = _format_value(state_mode, state.get(key))
+        if last_support.get(key):
+            support_ids = [last_support[key]]  # type: ignore[index]
+
+    support_id = support_ids[0] if len(support_ids) == 1 else None
+    return {
+        "value": value,
+        "support_id": support_id,
+        "support_ids": support_ids,
+    }
+
+
 def predict_ledger_row(row: dict[str, Any], *, protocol: str = "open_book") -> dict[str, Any]:
-    key = row["meta"]["key"]
-    last_value: str | None = None
-    last_uid: str | None = None
     if protocol == "open_book":
         entries = parse_updates(row["document"])
     elif protocol == "closed_book":
@@ -113,17 +297,14 @@ def predict_ledger_row(row: dict[str, Any], *, protocol: str = "open_book") -> d
         entries = parse_book_ledger(row["book"])
     else:
         raise ValueError("protocol must be open_book or closed_book")
-
-    for e in entries:
-        if e["key"] != key:
-            continue
-        last_uid = e["uid"]
-        last_value = e["value"]
+    state_mode = row.get("meta", {}).get("state_mode", "kv")
+    state, last_support, last_op = _apply_updates(state_mode, entries)
+    answer = _answer_from_state(row, state, last_support, last_op)
     return {
         "id": row["id"],
-        "value": last_value,
-        "support_id": last_uid,
-        "support_ids": [last_uid] if last_uid else [],
+        "value": answer["value"],
+        "support_id": answer["support_id"],
+        "support_ids": answer["support_ids"],
     }
 
 
@@ -162,12 +343,34 @@ def predict_naive_row(row: dict[str, Any], *, cfg: NaiveScanConfig | None = None
             last_value = None
             last_support = m_uid.group(1) if m_uid else last_support
 
-    return {
+    pred = {
         "id": row["id"],
         "value": last_value,
         "support_id": last_support,
         "support_ids": [last_support] if last_support else [],
     }
+    # Apply derived transforms on top of the naive direct scan.
+    if row.get("meta", {}).get("query_type") == "derived":
+        state_mode = row.get("meta", {}).get("state_mode", "kv")
+        derived_op = row.get("meta", {}).get("derived_op")
+        if derived_op == "color" and pred["value"]:
+            pred["value"] = str(pred["value"]).split("-", 1)[0]
+        elif derived_op == "parity" and pred["value"]:
+            try:
+                pred["value"] = "even" if int(pred["value"]) % 2 == 0 else "odd"
+            except ValueError:
+                pred["value"] = None
+        elif derived_op == "count" and pred["value"]:
+            if state_mode == "set":
+                parts = str(pred["value"]).split(",") if pred["value"] else []
+                pred["value"] = str(len([p for p in parts if p]))
+            else:
+                pred["value"] = None
+        elif derived_op == "reports":
+            pred["value"] = None
+            pred["support_id"] = None
+            pred["support_ids"] = []
+    return pred
 
 
 def iter_predictions(

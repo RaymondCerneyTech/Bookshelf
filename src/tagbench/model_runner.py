@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
-from tagbench.baselines import parse_book_ledger, parse_updates
+from tagbench.baselines import parse_book_ledger, parse_updates, validate_book_artifact
 
 
 class ModelAdapter(Protocol):
@@ -32,10 +32,13 @@ def load_adapter(spec: str) -> ModelAdapter:
 @dataclass(frozen=True)
 class ModelResult:
     predictions: list[dict[str, Any]]
+    raw_predictions: list[dict[str, Any]]
+    retrieval_stats: list[dict[str, Any]]
     tokens: int
     tokens_per_q: float
     passes: int
     artifact_stats: list[dict[str, Any]]
+    perf_stats: list[dict[str, Any]]
 
 
 class AdapterOutput(BaseModel):
@@ -44,6 +47,15 @@ class AdapterOutput(BaseModel):
     support_ids: list[str] = []
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def coerce_value(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float, bool)):
+            return str(v)
+        return v
 
     @field_validator("support_ids", mode="before")
     @classmethod
@@ -100,8 +112,11 @@ def run_adapter(
     max_support_k: int = 3,
 ) -> ModelResult:
     preds: list[dict[str, Any]] = []
+    raw_preds: list[dict[str, Any]] = []
     tokens = 0
     artifact_stats: list[dict[str, Any]] = []
+    perf_stats: list[dict[str, Any]] = []
+    retrieval_stats: list[dict[str, Any]] = []
     # Group by episode to allow one-time artifact construction.
     by_episode: dict[str, list[dict[str, Any]]] = {}
     for row in data_rows:
@@ -126,6 +141,33 @@ def run_adapter(
             tokens += len(source_text.split())  # one pass to answer this query
 
             out = adapter.predict(row_for_adapter, protocol=protocol) or {}
+            if hasattr(adapter, "take_perf"):
+                try:
+                    perf = adapter.take_perf()
+                except Exception:
+                    perf = None
+                if perf:
+                    perf_stats.append(perf)
+            if hasattr(adapter, "take_raw"):
+                try:
+                    raw = adapter.take_raw()
+                except Exception:
+                    raw = None
+                if isinstance(raw, dict):
+                    raw_preds.append(
+                        {
+                            "id": row["id"],
+                            "value": raw.get("value"),
+                            "support_ids": raw.get("support_ids"),
+                        }
+                    )
+            if hasattr(adapter, "take_diag"):
+                try:
+                    diag = adapter.take_diag()
+                except Exception:
+                    diag = None
+                if isinstance(diag, dict):
+                    retrieval_stats.append(diag)
             validated = validate_adapter_output(row=row, raw=out, protocol=protocol, max_support_k=max_support_k)
             pid = row["id"]
             preds.append(
@@ -139,10 +181,13 @@ def run_adapter(
 
     return ModelResult(
         predictions=preds,
+        raw_predictions=raw_preds,
+        retrieval_stats=retrieval_stats,
         tokens=tokens,
         tokens_per_q=(tokens / len(data_rows)) if data_rows else 0.0,
         passes=1,
         artifact_stats=artifact_stats,
+        perf_stats=perf_stats,
     )
 
 
@@ -164,12 +209,12 @@ def _artifact_report(*, artifact: str | None, episode_id: str, source_doc: str) 
         if in_glossary and line.startswith("- "):
             glossary_size += 1
 
-    leak = "- [U" in artifact and "UPDATE step=" in artifact  # doc-style lines leaking into artifact
+    validation = validate_book_artifact(artifact)
     return {
         "episode_id": episode_id,
         "has_artifact": True,
         "tokens": tokens,
         "ledger_entries": len(ledger),
         "glossary_entries": glossary_size,
-        "leak_check": not leak,
+        "leak_check": validation["ok"],
     }

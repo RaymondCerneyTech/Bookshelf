@@ -39,6 +39,32 @@ def test_adapter_output_validation_rejects_missing_value() -> None:
         validate_adapter_output(row=row, raw={"support_ids": []}, protocol="open_book", max_support_k=3)
 
 
+def test_adapter_output_validation_ignores_debug_output_field() -> None:
+    cfg = EpisodeConfig(steps=6, keys=2, queries=2, twins=False, distractor_profile="standard")
+    data = generate_dataset(seed=5, episodes=1, cfg=cfg)
+    row = data[0]
+
+    parsed = validate_adapter_output(
+        row=row,
+        raw={"value": "foo", "support_ids": [], "output": "{\"value\": \"foo\"}"},
+        protocol="open_book",
+        max_support_k=3,
+    )
+    assert parsed == {"value": "foo", "support_ids": []}
+
+
+def test_adapter_output_coerces_numeric_value() -> None:
+    cfg = EpisodeConfig(steps=6, keys=2, queries=2, twins=False, distractor_profile="standard")
+    row = generate_dataset(seed=13, episodes=1, cfg=cfg)[0]
+    parsed = validate_adapter_output(
+        row=row,
+        raw={"value": 2887, "support_ids": []},
+        protocol="open_book",
+        max_support_k=3,
+    )
+    assert parsed == {"value": "2887", "support_ids": []}
+
+
 def test_build_artifact_adapter_runs_closed_book() -> None:
     cfg = EpisodeConfig(steps=12, keys=3, queries=3, twins=False, distractor_profile="standard")
     data = generate_dataset(seed=4, episodes=1, cfg=cfg)

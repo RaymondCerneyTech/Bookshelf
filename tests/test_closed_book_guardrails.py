@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tagbench.baselines import parse_book_ledger
+from tagbench.baselines import parse_book_ledger, validate_book_artifact
 from tagbench.generate import EpisodeConfig, generate_dataset
 
 
@@ -15,6 +15,7 @@ def test_book_artifact_does_not_embed_update_lines_verbatim() -> None:
 
     ledger = parse_book_ledger(rows[0]["book"])
     assert ledger  # sanity: still parsed
+    assert validate_book_artifact(rows[0]["book"])["ok"]
 
 
 def test_closed_book_ignores_document() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,6 +19,18 @@ def _estimate_tokens(text: str) -> int:
     return len(text.split())
 
 
+def _set_max_book_tokens(adapter: Any, max_book_tokens: int) -> None:
+    if hasattr(adapter, "max_book_tokens"):
+        setattr(adapter, "max_book_tokens", max_book_tokens)
+
+
+def _env_snapshot() -> dict[str, Any]:
+    return {
+        "TAGBENCH_MODEL": os.getenv("TAGBENCH_MODEL"),
+        "TAGBENCH_REQUIRE_CITATIONS": os.getenv("TAGBENCH_REQUIRE_CITATIONS"),
+    }
+
+
 def _print_report(res, prefix: str = "", eff: dict[str, Any] | None = None) -> None:
     prefix_str = f"{prefix}" if prefix else ""
     print(f"{prefix_str}n={res.n} value_acc={res.value_acc:.3f} exact_acc={res.exact_acc:.3f}", end="")
@@ -26,6 +39,8 @@ def _print_report(res, prefix: str = "", eff: dict[str, Any] | None = None) -> N
             f" cite_f1={res.citation_f1:.3f} cite_p={res.citation_precision:.3f} cite_r={res.citation_recall:.3f}",
             end="",
         )
+    if res.support_bloat is not None:
+        print(f" support_bloat={res.support_bloat:.3f}", end="")
     if res.entailment_rate is not None:
         print(f" entailment={res.entailment_rate:.3f}", end="")
     if res.twin_consistency is not None:
@@ -36,6 +51,10 @@ def _print_report(res, prefix: str = "", eff: dict[str, Any] | None = None) -> N
         print(f" instr_acc={res.instruction_acc:.3f}", end="")
     if res.instruction_gap is not None:
         print(f" instr_gap={res.instruction_gap:.3f}", end="")
+    if res.instr_override_rate is not None:
+        print(f" instr_override={res.instr_override_rate:.3f}", end="")
+    if res.state_integrity_rate is not None:
+        print(f" state_integrity={res.state_integrity_rate:.3f}", end="")
     if eff:
         print(
             f" tokens={eff['tokens']} (~{eff['tokens_per_q']:.1f}/q) passes={eff['passes']} wall_s={eff['wall']:.2f}",
@@ -49,7 +68,9 @@ def _cmd_generate(ns: argparse.Namespace) -> int:
         steps=ns.steps,
         keys=ns.keys,
         queries=ns.queries,
+        derived_query_rate=ns.derived_query_rate,
         distractor_rate=ns.distractor_rate,
+        tail_distractor_steps=ns.tail_distractor_steps,
         clear_rate=ns.clear_rate,
         chapters=ns.chapters,
         require_citations=ns.require_citations,
@@ -115,12 +136,16 @@ def _cmd_grade(ns: argparse.Namespace) -> int:
 def _cmd_model(ns: argparse.Namespace) -> int:
     data_rows = list(read_jsonl(ns.data))
     adapter = load_adapter(ns.adapter)
+    if ns.max_book_tokens is not None:
+        _set_max_book_tokens(adapter, ns.max_book_tokens)
+    start = time.perf_counter()
     res_model = run_adapter(
         data_rows=data_rows,
         adapter=adapter,
         protocol=ns.protocol,
         max_support_k=ns.max_support_k,
     )
+    wall = time.perf_counter() - start
     res = grade_rows(
         data_rows=data_rows,
         pred_by_id=_pred_index(res_model.predictions),
@@ -129,7 +154,29 @@ def _cmd_model(ns: argparse.Namespace) -> int:
         max_support_k=ns.max_support_k,
         entailment_check=ns.entailment_check,
     )
-    eff = {"tokens": res_model.tokens, "tokens_per_q": res_model.tokens_per_q, "passes": res_model.passes, "wall": 0.0}
+    raw_res = None
+    if res_model.raw_predictions:
+        raw_res = grade_rows(
+            data_rows=data_rows,
+            pred_by_id=_pred_index(res_model.raw_predictions),
+            citations=ns.citations,
+            support_metric=ns.support_metric,
+            max_support_k=ns.max_support_k,
+            entailment_check=ns.entailment_check,
+        )
+    prefill_s = sum((p.get("prefill_s") or 0.0) for p in res_model.perf_stats)
+    decode_s = sum((p.get("decode_s") or 0.0) for p in res_model.perf_stats)
+    eff = {
+        "tokens": res_model.tokens,
+        "tokens_per_q": res_model.tokens_per_q,
+        "passes": res_model.passes,
+        "wall_s": wall,
+        "wall_s_per_q": (wall / len(data_rows)) if data_rows else 0.0,
+        "prefill_s": prefill_s if res_model.perf_stats else None,
+        "decode_s": decode_s if res_model.perf_stats else None,
+        "prefill_s_per_q": (prefill_s / len(data_rows)) if res_model.perf_stats and data_rows else None,
+        "decode_s_per_q": (decode_s / len(data_rows)) if res_model.perf_stats and data_rows else None,
+    }
     _print_report(res, prefix=f"adapter={ns.adapter} protocol={ns.protocol} ", eff=eff)
     if ns.out:
         write_jsonl(ns.out, res_model.predictions)
@@ -138,6 +185,15 @@ def _cmd_model(ns: argparse.Namespace) -> int:
             "adapter_schema_version": "1.0",
             "adapter": ns.adapter,
             "protocol": ns.protocol,
+            "data": {"path": str(ns.data), "n": len(data_rows)},
+            "config": {
+                "citations": ns.citations,
+                "support_metric": ns.support_metric,
+                "max_support_k": ns.max_support_k,
+                "entailment_check": ns.entailment_check,
+                "max_book_tokens": ns.max_book_tokens,
+            },
+            "env": _env_snapshot(),
             "metrics": {
                 "value_acc": res.value_acc,
                 "exact_acc": res.exact_acc,
@@ -149,10 +205,29 @@ def _cmd_model(ns: argparse.Namespace) -> int:
                 "twin_flip_rate": res.twin_flip_rate,
                 "instruction_acc": res.instruction_acc,
                 "instruction_gap": res.instruction_gap,
+                "instr_override_rate": res.instr_override_rate,
+                "state_integrity_rate": res.state_integrity_rate,
             },
+            "metrics_raw": None,
             "efficiency": eff,
             "artifact_stats": res_model.artifact_stats,
+            "retrieval_stats": res_model.retrieval_stats,
         }
+        if raw_res is not None:
+            results_payload["metrics_raw"] = {
+                "value_acc": raw_res.value_acc,
+                "exact_acc": raw_res.exact_acc,
+                "cite_f1": raw_res.citation_f1,
+                "cite_p": raw_res.citation_precision,
+                "cite_r": raw_res.citation_recall,
+                "entailment": raw_res.entailment_rate,
+                "twin_consistency": raw_res.twin_consistency,
+                "twin_flip_rate": raw_res.twin_flip_rate,
+                "instruction_acc": raw_res.instruction_acc,
+                "instruction_gap": raw_res.instruction_gap,
+                "instr_override_rate": raw_res.instr_override_rate,
+                "state_integrity_rate": raw_res.state_integrity_rate,
+            }
         Path(ns.results_json).write_text(json.dumps(results_payload, indent=2), encoding="utf-8")
     return 0
 
@@ -170,7 +245,8 @@ def _cmd_run(ns: argparse.Namespace) -> int:
             "tokens": tokens,
             "tokens_per_q": tokens / len(data_rows) if data_rows else 0.0,
             "passes": 1,
-            "wall": wall,
+            "wall_s": wall,
+            "wall_s_per_q": (wall / len(data_rows)) if data_rows else 0.0,
         }
         res = grade_rows(
             data_rows=data_rows,
@@ -185,6 +261,14 @@ def _cmd_run(ns: argparse.Namespace) -> int:
             "adapter_schema_version": "1.0",
             "baseline": ns.baseline,
             "protocol": protocol,
+            "data": {"path": str(ns.data), "n": len(data_rows)},
+            "config": {
+                "citations": ns.citations,
+                "support_metric": ns.support_metric,
+                "max_support_k": ns.max_support_k,
+                "entailment_check": ns.entailment_check,
+            },
+            "env": _env_snapshot(),
             "metrics": {
                 "value_acc": res.value_acc,
                 "exact_acc": res.exact_acc,
@@ -220,69 +304,176 @@ def _cmd_sweep(ns: argparse.Namespace) -> int:
     out_root: Path = ns.out
     out_root.mkdir(parents=True, exist_ok=True)
 
+    adapter = load_adapter(ns.adapter) if ns.adapter else None
+    max_book_tokens_list = [ns.max_book_tokens] if ns.max_book_tokens is not None else [None]
+    if ns.max_book_tokens_list:
+        max_book_tokens_list = [int(s) for s in ns.max_book_tokens_list.split(",") if s.strip()]
+
+    derived_rate = 0.0 if ns.no_derived_queries else ns.derived_query_rate
+    require_citations = ns.require_citations if ns.require_citations is not None else True
+    sweep_config = {
+        "seeds": ns.seeds,
+        "episodes": ns.episodes,
+        "steps": ns.steps,
+        "steps_list": ns.steps_list,
+        "keys": ns.keys,
+        "queries": ns.queries,
+        "derived_query_rate": derived_rate,
+        "chapters": ns.chapters,
+        "distractor_rate": ns.distractor_rate,
+        "tail_distractor_steps": ns.tail_distractor_steps,
+        "clear_rate": ns.clear_rate,
+        "require_citations": require_citations,
+        "twins": ns.twins,
+        "state_modes": ns.state_modes,
+        "distractor_profiles": ns.distractor_profiles,
+        "max_book_tokens": ns.max_book_tokens,
+        "max_book_tokens_list": ns.max_book_tokens_list,
+        "no_derived_queries": ns.no_derived_queries,
+        "no_require_citations": None,
+    }
+    steps_list = [ns.steps]
+    if ns.steps_list:
+        steps_list = [int(s) for s in ns.steps_list.split(",") if s.strip()]
     for seed in range(ns.seeds):
         for mode in state_modes:
             for profile in profiles:
-                cfg = EpisodeConfig(
-                    steps=ns.steps,
-                    keys=ns.keys,
-                    queries=ns.queries,
-                    chapters=ns.chapters,
-                    distractor_rate=ns.distractor_rate,
-                    clear_rate=ns.clear_rate,
-                    distractor_profile=profile,
-                    state_mode=mode,
-                    twins=True,
-                )
-                data = generate_dataset(seed=seed, episodes=ns.episodes, cfg=cfg)
-                run_dir = out_root / f"seed{seed}-mode{mode}-prof{profile}"
-                run_dir.mkdir(parents=True, exist_ok=True)
-                data_path = run_dir / "data.jsonl"
-                preds_path = run_dir / "preds.jsonl"
-                results_path = run_dir / "results.json"
-                write_jsonl(data_path, data)
+                for steps in steps_list:
+                    for max_book_tokens in max_book_tokens_list:
+                        if adapter and max_book_tokens is not None:
+                            _set_max_book_tokens(adapter, max_book_tokens)
+                        cfg = EpisodeConfig(
+                            steps=steps,
+                            keys=ns.keys,
+                            queries=ns.queries,
+                            derived_query_rate=derived_rate,
+                            chapters=ns.chapters,
+                            distractor_rate=ns.distractor_rate,
+                            tail_distractor_steps=ns.tail_distractor_steps,
+                            clear_rate=ns.clear_rate,
+                            require_citations=require_citations,
+                            distractor_profile=profile,
+                            state_mode=mode,
+                            twins=ns.twins,
+                        )
+                        data = generate_dataset(seed=seed, episodes=ns.episodes, cfg=cfg)
+                        run_dir_name = f"seed{seed}-steps{steps}"
+                        if max_book_tokens is not None:
+                            run_dir_name = f"{run_dir_name}-book{max_book_tokens}"
+                        run_dir_name = f"{run_dir_name}-mode{mode}-prof{profile}"
+                        run_dir = out_root / run_dir_name
+                        run_dir.mkdir(parents=True, exist_ok=True)
+                        data_path = run_dir / "data.jsonl"
+                        preds_path = run_dir / "preds.jsonl"
+                        results_path = run_dir / "results.json"
+                        write_jsonl(data_path, data)
 
-                preds = list(iter_predictions(data, baseline="ledger", protocol="closed_book"))
-                write_jsonl(preds_path, preds)
-                res = grade_rows(
-                    data_rows=data,
-                    pred_by_id=_pred_index(preds),
-                    citations="auto",
-                    support_metric="f1",
-                    max_support_k=ns.max_support_k,
-                    entailment_check=True,
-                )
-                tokens = sum(_estimate_tokens(r["book"]) for r in data)
-                eff = {
-                    "tokens": tokens,
-                    "tokens_per_q": tokens / len(data) if data else 0.0,
-                    "passes": 1,
-                    "wall": 0.0,
-                }
-                payload = {
-                    "adapter_schema_version": "1.0",
-                    "baseline": "ledger",
-                    "protocol": "closed_book",
-                    "seed": seed,
-                    "state_mode": mode,
-                    "distractor_profile": profile,
-                    "metrics": {
-                        "value_acc": res.value_acc,
-                        "exact_acc": res.exact_acc,
-                        "cite_f1": res.citation_f1,
-                        "cite_p": res.citation_precision,
-                        "cite_r": res.citation_recall,
-                        "entailment": res.entailment_rate,
-                        "twin_consistency": res.twin_consistency,
-                        "twin_flip_rate": res.twin_flip_rate,
-                        "instruction_acc": res.instruction_acc,
-                        "instruction_gap": res.instruction_gap,
-                    },
-                    "efficiency": eff,
-                    "artifact_stats": [],
-                }
-                results.append(payload)
-                results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        model_res = None
+                        if adapter:
+                            start = time.perf_counter()
+                            model_res = run_adapter(
+                                data_rows=data,
+                                adapter=adapter,
+                                protocol="closed_book",
+                                max_support_k=ns.max_support_k,
+                            )
+                            wall = time.perf_counter() - start
+                            prefill_s = sum((p.get("prefill_s") or 0.0) for p in model_res.perf_stats)
+                            decode_s = sum((p.get("decode_s") or 0.0) for p in model_res.perf_stats)
+                            preds = model_res.predictions
+                            eff = {
+                                "tokens": model_res.tokens,
+                                "tokens_per_q": model_res.tokens_per_q,
+                                "passes": model_res.passes,
+                                "wall_s": wall,
+                                "wall_s_per_q": (wall / len(data)) if data else 0.0,
+                                "prefill_s": prefill_s if model_res.perf_stats else None,
+                                "decode_s": decode_s if model_res.perf_stats else None,
+                                "prefill_s_per_q": (prefill_s / len(data)) if model_res.perf_stats and data else None,
+                                "decode_s_per_q": (decode_s / len(data)) if model_res.perf_stats and data else None,
+                            }
+                            art_stats = model_res.artifact_stats
+                        else:
+                            start = time.perf_counter()
+                            preds = list(iter_predictions(data, baseline="ledger", protocol="closed_book"))
+                            wall = time.perf_counter() - start
+                            eff = {
+                                "tokens": sum(_estimate_tokens(r["book"]) for r in data),
+                                "tokens_per_q": sum(_estimate_tokens(r["book"]) for r in data) / len(data)
+                                if data
+                                else 0.0,
+                                "passes": 1,
+                                "wall_s": wall,
+                                "wall_s_per_q": (wall / len(data)) if data else 0.0,
+                            }
+                            art_stats = []
+
+                        write_jsonl(preds_path, preds)
+                        res = grade_rows(
+                            data_rows=data,
+                            pred_by_id=_pred_index(preds),
+                            citations="off" if not require_citations else "auto",
+                            support_metric="f1",
+                            max_support_k=ns.max_support_k,
+                            entailment_check=True,
+                        )
+                        raw_res = None
+                        if adapter and model_res and model_res.raw_predictions:
+                            raw_res = grade_rows(
+                                data_rows=data,
+                                pred_by_id=_pred_index(model_res.raw_predictions),
+                                citations="off" if not require_citations else "auto",
+                                support_metric="f1",
+                                max_support_k=ns.max_support_k,
+                                entailment_check=True,
+                            )
+                        payload = {
+                            "adapter_schema_version": "1.0",
+                            "baseline": "ledger" if adapter is None else ns.adapter,
+                            "protocol": "closed_book",
+                            "seed": seed,
+                            "steps": steps,
+                            "state_mode": mode,
+                            "distractor_profile": profile,
+                            "data": {"path": str(data_path), "n": len(data)},
+                            "config": {**sweep_config, "steps": steps, "max_book_tokens": max_book_tokens},
+                            "env": _env_snapshot(),
+                            "metrics": {
+                                "value_acc": res.value_acc,
+                                "exact_acc": res.exact_acc,
+                                "cite_f1": res.citation_f1,
+                                "cite_p": res.citation_precision,
+                                "cite_r": res.citation_recall,
+                                "entailment": res.entailment_rate,
+                                "twin_consistency": res.twin_consistency,
+                                "twin_flip_rate": res.twin_flip_rate,
+                                "instruction_acc": res.instruction_acc,
+                                "instruction_gap": res.instruction_gap,
+                                "instr_override_rate": res.instr_override_rate,
+                                "state_integrity_rate": res.state_integrity_rate,
+                            },
+                            "metrics_raw": None,
+                            "efficiency": eff,
+                            "artifact_stats": art_stats,
+                            "retrieval_stats": model_res.retrieval_stats if adapter else [],
+                        }
+                        if raw_res is not None:
+                            payload["metrics_raw"] = {
+                                "value_acc": raw_res.value_acc,
+                                "exact_acc": raw_res.exact_acc,
+                                "cite_f1": raw_res.citation_f1,
+                                "cite_p": raw_res.citation_precision,
+                                "cite_r": raw_res.citation_recall,
+                                "entailment": raw_res.entailment_rate,
+                                "twin_consistency": raw_res.twin_consistency,
+                                "twin_flip_rate": raw_res.twin_flip_rate,
+                                "instruction_acc": raw_res.instruction_acc,
+                                "instruction_gap": raw_res.instruction_gap,
+                                "instr_override_rate": raw_res.instr_override_rate,
+                                "state_integrity_rate": raw_res.state_integrity_rate,
+                            }
+                        results.append(payload)
+                        results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     if ns.results_json:
         Path(ns.results_json).write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -300,12 +491,19 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--steps", type=int, default=220)
     g.add_argument("--keys", type=int, default=14)
     g.add_argument("--queries", type=int, default=12)
+    g.add_argument("--derived-query-rate", type=float, default=0.35)
     g.add_argument("--chapters", type=int, default=8)
     g.add_argument("--distractor-rate", type=float, default=0.50)
+    g.add_argument(
+        "--tail-distractor-steps",
+        type=int,
+        default=0,
+        help="Force a distractor-only tail for the final N steps to stress recency.",
+    )
     g.add_argument("--clear-rate", type=float, default=0.08)
     g.add_argument(
         "--distractor-profile",
-        choices=["easy", "standard", "adversarial", "instruction"],
+        choices=["easy", "standard", "adversarial", "instruction", "instruction_suite"],
         default="instruction",
         help="Adversarial adds stale-echo distractors; instruction injects spec-violating lines.",
     )
@@ -375,6 +573,12 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--support-metric", choices=["f1", "exact"], default="f1")
     m.add_argument("--max-support-k", type=int, default=3)
     m.add_argument(
+        "--max-book-tokens",
+        type=int,
+        default=None,
+        help="Optional cap for adapter book tokens (if supported by adapter).",
+    )
+    m.add_argument(
         "--entailment-check",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -389,14 +593,57 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seeds", type=int, default=5, help="Number of seeds (0..seeds-1).")
     s.add_argument("--episodes", type=int, default=2)
     s.add_argument("--steps", type=int, default=150)
+    s.add_argument(
+        "--steps-list",
+        type=str,
+        default=None,
+        help="Optional comma-separated steps list for PaTH-style curves (e.g., 20,40,80,160).",
+    )
     s.add_argument("--keys", type=int, default=10)
     s.add_argument("--queries", type=int, default=12)
+    s.add_argument("--derived-query-rate", type=float, default=0.35)
+    s.add_argument(
+        "--no-derived-queries",
+        action="store_true",
+        help="Disable derived queries in sweeps (sets derived_query_rate=0).",
+    )
     s.add_argument("--chapters", type=int, default=6)
     s.add_argument("--distractor-rate", type=float, default=0.5)
+    s.add_argument(
+        "--tail-distractor-steps",
+        type=int,
+        default=0,
+        help="Force a distractor-only tail for the final N steps to stress recency.",
+    )
     s.add_argument("--clear-rate", type=float, default=0.08)
     s.add_argument("--state-modes", type=str, default="kv,counter,set,relational")
-    s.add_argument("--distractor-profiles", type=str, default="standard,adversarial,instruction")
+    s.add_argument("--distractor-profiles", type=str, default="instruction,adversarial")
+    s.add_argument("--adapter", type=str, default=None, help="Optional adapter spec module:factory; defaults to ledger baseline.")
     s.add_argument("--max-support-k", type=int, default=3)
+    s.add_argument(
+        "--twins",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If set, generate a counterfactual twin for each episode (anti-shortcut metric).",
+    )
+    s.add_argument(
+        "--require-citations",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="If set, questions require ledger support IDs.",
+    )
+    s.add_argument(
+        "--max-book-tokens",
+        type=int,
+        default=None,
+        help="Optional cap for adapter book tokens (if supported by adapter).",
+    )
+    s.add_argument(
+        "--max-book-tokens-list",
+        type=str,
+        default=None,
+        help="Optional comma-separated max_book_tokens list for memory-budget sweeps (e.g., 200,400,800).",
+    )
     s.add_argument("--results-json", type=Path, default=None, help="If set, write combined results JSON here.")
     s.set_defaults(func=_cmd_sweep)
 

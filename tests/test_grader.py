@@ -41,3 +41,38 @@ def test_support_truncation_and_entailment() -> None:
     wrong_entail = {"Q1": {"value": "amber-0001", "support_ids": ["U0B2B2B"]}}
     res = grade_rows(data_rows=data, pred_by_id=wrong_entail, citations="auto", entailment_check=True)
     assert res.entailment_rate == 0.0
+
+
+def test_support_bloat_penalizes_exact() -> None:
+    data = [
+        {
+            "id": "Q1",
+            "gold": {"value": "amber-0001", "support_ids": ["U0A1A1A"]},
+            "meta": {"requires_citation": True, "key": "tag.00"},
+            "document": "# Ep\n\n## Episode Log\n- [U0A1A1A] UPDATE step=1 SET tag.00 = amber-0001\n",
+        }
+    ]
+    bloated = {"Q1": {"value": "amber-0001", "support_ids": ["U0A1A1A", "U0B2B2B"]}}
+    res = grade_rows(data_rows=data, pred_by_id=bloated, citations="auto", entailment_check=False)
+    assert res.support_bloat == 1.0
+    assert res.exact_acc == 0.0
+
+
+def test_instruction_override_and_integrity_rates() -> None:
+    data = [
+        {
+            "id": "Q1",
+            "gold": {"value": "amber-0001", "support_ids": ["U0A1A1A"]},
+            "meta": {"requires_citation": False, "key": "tag.00", "has_instruction": True, "instruction_value": "mauve-9999"},
+            "document": "# Ep\n\n## Episode Log\n- [U0A1A1A] UPDATE step=1 SET tag.00 = amber-0001\n",
+        }
+    ]
+    pred_override = {"Q1": {"value": "mauve-9999", "support_ids": []}}
+    res = grade_rows(data_rows=data, pred_by_id=pred_override, citations="off", entailment_check=False)
+    assert res.instr_override_rate == 1.0
+    assert res.state_integrity_rate == 0.0
+
+    pred_integrity = {"Q1": {"value": "amber-0001", "support_ids": []}}
+    res = grade_rows(data_rows=data, pred_by_id=pred_integrity, citations="off", entailment_check=False)
+    assert res.instr_override_rate == 0.0
+    assert res.state_integrity_rate == 1.0
