@@ -208,12 +208,27 @@ Reference system (baseline vs reranker in one command):
 .\scripts\run_reference.ps1 -Preset quick -ModelPath "C:\AI\models\your-model.gguf"
 ```
 
+Expected output: `runs\summary_all.csv` with rows for selector_quick_none_k2/4/8 and selector_quick_latest_step_k2/4/8.
+
+```powershell
+.\scripts\run_reference.ps1 -Preset quick -ModelPath "C:\AI\models\your-model.gguf"
+```
+
 Selector+answerer preset (reranker baseline):
 
 ```powershell
 .\scripts\run_selector_bench.ps1 -Preset quick -ModelPath "C:\AI\models\your-model.gguf"
 .\scripts\run_selector_bench.ps1 -Preset quick -ModelPath "C:\AI\models\your-model.gguf" -UseRerank
 ```
+
+Selector bake-off (quick preset, four rerank modes):
+
+```powershell
+.\scripts\run_selector_bakeoff.ps1 -Preset quick -ModelPath "C:\AI\models\your-model.gguf"
+```
+
+Expected output: updated `runs\summary_all.csv` with selector_quick_<rerank>_k2/4/8 rows for `none`,
+`latest_step`, `last_occurrence`, and `prefer_set_latest`.
 
 Estimate runtime before a sweep:
 
@@ -320,8 +335,8 @@ Set `GOLDEVIDENCEBENCH_RETRIEVAL_QUERY_SANDWICH=1` to repeat the question before
 candidate ledger lines (query sandwich mitigation).
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_PICK_THEN_ANSWER=1` to force a two-step flow: pick a support_id
 first, then answer using only that line.
-Set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=latest_step` to deterministically choose the newest candidate
-before answering (non-LLM selector baseline).
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=latest_step|last_occurrence|prefer_set_latest` to deterministically
+choose a candidate before answering (non-LLM selector baseline).
 
 Retrieval order bias (example, k=4, s3q16, kv/standard, gold always present):
 
@@ -401,6 +416,49 @@ Selector quick preset (same_key, shuffle, s2q12):
 - rerank latest_step: k=2 1.0, k=4 1.0, k=8 1.0
 
 Quick preset takeaway: even a small reranker makes selection near-perfect in fast runs.
+
+## Reference proof (selector vs LLM)
+
+latest_step reranking uses only fields present in the candidate ledger lines (no hidden gold metadata).
+
+| preset | k | rerank | gold_present | selection_rate | value_acc |
+| --- | --- | --- | --- | --- | --- |
+| quick | 2 | none | 1 | 0.1667 | 0.1667 |
+| quick | 4 | none | 1 | 0.2917 | 0.2917 |
+| quick | 8 | none | 1 | 0.25 | 0.25 |
+| quick | 2 | latest_step | 1 | 1 | 1 |
+| quick | 4 | latest_step | 1 | 1 | 1 |
+| quick | 8 | latest_step | 1 | 1 | 1 |
+
+
+Report preset (s5q24) run (same table, larger sample):
+
+| preset | k | rerank | gold_present | selection_rate | value_acc |
+| --- | --- | --- | --- | --- | --- |
+| standard | 2 | none | 1 | 0.55 | 0.55 |
+| standard | 4 | none | 1 | 0.3333 | 0.3333 |
+| standard | 8 | none | 1 | 0.2583 | 0.2583 |
+| standard | 2 | latest_step | 1 | 1 | 0.9667 |
+| standard | 4 | latest_step | 1 | 1 | 0.9667 |
+| standard | 8 | latest_step | 1 | 1 | 0.9667 |
+| standard | 2 | last_occurrence | 1 | 0.2917 | 0.2917 |
+| standard | 4 | last_occurrence | 1 | 0.125 | 0.1083 |
+| standard | 8 | last_occurrence | 1 | 0.1083 | 0.1083 |
+| standard | 2 | prefer_set_latest | 1 | 1 | 0.9667 |
+| standard | 4 | prefer_set_latest | 1 | 1 | 0.9667 |
+| standard | 8 | prefer_set_latest | 1 | 1 | 0.9667 |
+
+Interpretation: selection under ambiguity is the bottleneck. The LLM-only selector degrades as k grows, while simple deterministic reranking (latest_step or prefer_set_latest) restores near-perfect selection when gold is present. last_occurrence underperforms because shuffled candidates break recency-by-position.
+
+```powershell
+.\scripts\run_selector_bench.ps1 -Preset standard -ModelPath "C:\AI\models\your-model.gguf"
+.\scripts\run_selector_bench.ps1 -Preset standard -ModelPath "C:\AI\models\your-model.gguf" -UseRerank
+```
+
+```powershell
+.\scripts\run_selector_bench.ps1 -Preset standard -ModelPath "C:\AI\models\your-model.gguf"
+.\scripts\run_selector_bench.ps1 -Preset standard -ModelPath "C:\AI\models\your-model.gguf" -UseRerank
+```
 
 
 - k=2: rerank none 0.3167, rerank latest_step 0.6667

@@ -22,7 +22,7 @@ class RetrievalConfig:
     order_seed: int = 0
     query_sandwich: bool = False
     pick_then_answer: bool = False
-    rerank_mode: str = "none"  # none|latest_step
+    rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest
 
 
 def _sorted_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -112,6 +112,20 @@ def _rerank_latest_step(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not entries:
         return None
     return max(entries, key=lambda e: int(e.get("step", -1)))
+
+
+def _rerank_last_occurrence(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    return entries[-1]
+
+
+def _rerank_prefer_set_latest(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    set_entries = [e for e in entries if e.get("op") == "SET"]
+    candidates = set_entries if set_entries else entries
+    return max(candidates, key=lambda e: int(e.get("step", -1)))
 
 
 def _build_min_book(*, entry: dict[str, Any], key: str, episode_id: str) -> str:
@@ -232,7 +246,12 @@ class RetrievalLlamaCppAdapter:
             order_seed=order_seed,
             query_sandwich=sandwich_env in {"1", "true", "yes"},
             pick_then_answer=pick_env in {"1", "true", "yes"},
-            rerank_mode=rerank_env if rerank_env in {"none", "latest_step"} else "none",
+            rerank_mode=(
+                rerank_env
+                if rerank_env
+                in {"none", "latest_step", "last_occurrence", "prefer_set_latest"}
+                else "none"
+            ),
         )
         from goldevidencebench.adapters.llama_cpp_adapter import LlamaCppAdapter
 
@@ -305,11 +324,18 @@ class RetrievalLlamaCppAdapter:
             mini_book = _build_min_book(entry=entry, key=key, episode_id=row.get("episode_id", "E0000"))
         else:
             mini_book = _build_multi_book(entries=selected, episode_id=row.get("episode_id", "E0000"))
-        if self.cfg.rerank_mode == "latest_step":
-            chosen = _rerank_latest_step(selected)
+        if self.cfg.rerank_mode != "none":
+            if self.cfg.rerank_mode == "latest_step":
+                chosen = _rerank_latest_step(selected)
+            elif self.cfg.rerank_mode == "last_occurrence":
+                chosen = _rerank_last_occurrence(selected)
+            elif self.cfg.rerank_mode == "prefer_set_latest":
+                chosen = _rerank_prefer_set_latest(selected)
+            else:
+                chosen = None
             self._last_diag = {
                 **(self._last_diag or {}),
-                "rerank_mode": "latest_step",
+                "rerank_mode": self.cfg.rerank_mode,
                 "reranked_uid": chosen.get("uid") if chosen else None,
             }
             if chosen:
