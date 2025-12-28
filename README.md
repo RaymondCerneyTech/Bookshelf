@@ -369,6 +369,43 @@ Retrieval order bias (example, k=4, s3q16, kv/standard, gold always present):
 Entailment stays 1.0 and `gold_in_context_rate` is 1.0, so the failures are positional
 selection errors (not retrieval or hallucination).
 
+Order-bias (LLM-only, k=4, same_key, shuffle, s5q24):
+
+| order | selection_rate | accuracy_when_gold_present | value_acc |
+| --- | --- | --- | --- |
+| gold_first | 0.0000 | 0.0000 | 0.0000 |
+| gold_middle | 0.0083 | 0.0083 | 0.0083 |
+| gold_last | 1.0000 | 1.0000 | 1.0000 |
+| shuffle | 0.4417 | 0.4417 | 0.4417 |
+
+Gold is always present; the collapse in gold_first/middle is pure selection bias.
+This aligns with the smaller s3q16 run and shows the effect is stable with more samples.
+
+Order-bias (selector on: latest_step, same settings):
+
+| order | selection_rate | accuracy_when_gold_present | value_acc |
+| --- | --- | --- | --- |
+| gold_first | 1.0000 | 0.9750 | 0.9750 |
+| gold_middle | 1.0000 | 0.9750 | 0.9750 |
+| gold_last | 1.0000 | 0.9750 | 0.9750 |
+| shuffle | 1.0000 | 0.9750 | 0.9750 |
+
+Selector removes order bias in this regime.
+
+Multi-model spot check (Meta-Llama-3.1-8B-Instruct Q4_K_M vs Qwen, s3q16):
+
+| preset | model | selection_rate | accuracy_when_gold_present | value_acc |
+| --- | --- | --- | --- | --- |
+| hard selection (same_key, k=4, shuffle) | Qwen 2.5 7B | 0.4167 | 0.4167 | 0.4167 |
+| hard selection (same_key, k=4, shuffle) | Meta-Llama 3.1 8B Q4_K_M | 0.3125 | 0.2708 | 0.2708 |
+| order bias (gold_first) | Qwen 2.5 7B | 0.0000 | 0.0000 | 0.0000 |
+| order bias (gold_first) | Meta-Llama 3.1 8B Q4_K_M | 0.0417 | 0.0417 | 0.0417 |
+| order bias (gold_last) | Qwen 2.5 7B | 1.0000 | 1.0000 | 1.0000 |
+| order bias (gold_last) | Meta-Llama 3.1 8B Q4_K_M | 0.5208 | 0.2917 | 0.2917 |
+
+Meta-Llama shows the same order-bias pattern but lower selection under ambiguity in these runs.
+Drop sweep (k=4, shuffle): Meta-Llama selection_rate falls from 0.2708 (drop=0) to 0.1875 (drop=0.2) and 0.0833 (drop=0.4).
+
 Stability check (k=4, s5q24, kv/standard, gold always present):
 
 - `gold_first`: value/exact/cite_f1 = 0.0
@@ -412,6 +449,9 @@ Pick-then-answer A/B (same_key, k=4, s3q16):
 
 Selection rate matches accuracy_when_gold_present; pick-then-answer does not improve
 selection in this regime and can lower gold_last.
+
+Matched s5q24 run (same_key, k=4, shuffle): pick-then-answer on/off are identical.
+Both show selection_rate 1.0 and accuracy_when_gold_present 0.975, so the prompt trick adds no benefit in this easier regime.
 
 Reranker baseline (same_key, k=4, shuffle, s3q16):
 
@@ -539,6 +579,13 @@ Formulas people can use:
 - `selection_gap` = `accuracy_when_gold_present - overall_accuracy` (loss from selection + formatting).
 
 Blunt system rule: if `gold_present_rate` is high but `selection_rate` is low, fix selection/ranking. If `gold_present_rate` is low, fix retrieval/recall. If both are high but accuracy is low, fix answer formatting or value extraction.
+
+How to read the scores (plain English):
+
+- If `gold_present_rate` is low, your retriever is failing (evidence missing).
+- If `gold_present_rate` is high but `selection_rate` is low, you have an ordering/selection problem.
+- If `selection_rate` is high but `accuracy_when_gold_present` is low, the answerer fails even with correct evidence.
+- If `value_acc` is high but `exact_acc` is low, answers are right but citations/formatting are wrong.
 
 Reproduce the k=4 order-bias run:
 
