@@ -12,6 +12,20 @@ GoldEvidenceBench is a small benchmark + reference codebase for testing whether 
 
 GoldEvidenceBench shows whether your AI system can reliably pick the right piece of evidence when several similar candidates exist. It builds long, noisy logs with changing facts, then checks if the model chooses the most recent, correct update and cites it. The key benefit is that it separates "the evidence was available" from "the model chose the right evidence," so you can improve the exact part of your system that is failing (retrieval vs selection vs formatting).
 
+## Primary flow (the done path)
+
+1) Run one command to reproduce the headline:
+
+```powershell
+.\scripts\run_reference.ps1 -Preset standard -ModelPath "C:\AI\models\your-model.gguf"
+```
+
+2) Read the result table in `runs/summary_all.csv` (it matches the "Reference proof" section below).
+
+3) Takeaways: selection under ambiguity fails for LLM?only; a deterministic selector fixes it; order bias disappears with selection.
+
+Everything else in this README is an extension or deeper dive.
+
 ## Headline results (summary)
 
 Selection under ambiguity is the bottleneck. Simple deterministic selection outperforms the LLM as candidate lists grow.
@@ -380,6 +394,14 @@ Order-bias (LLM-only, k=4, same_key, shuffle, s5q24):
 
 Gold is always present; the collapse in gold_first/middle is pure selection bias.
 This aligns with the smaller s3q16 run and shows the effect is stable with more samples.
+
+Plot the order-bias figure:
+
+```powershell
+python .\scripts\plot_order_bias.py --in-csv .\runs\summary_all.csv --out .\docs\figures\order_bias_s5q24_llm.png
+```
+
+![Order bias (LLM-only, k=4, same_key, s5q24)](docs/figures/order_bias_s5q24_llm.png)
 
 Order-bias (selector on: latest_step, same settings):
 
