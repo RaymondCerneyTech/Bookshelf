@@ -3,14 +3,17 @@ from __future__ import annotations
 import random
 
 from goldevidencebench.adapters.retrieval_llama_cpp_adapter import (
+    _LINEAR_FEATURE_ORDER,
     _apply_drop_with_rng,
     _apply_order,
     _build_min_book,
     _latest_entry_for_key,
     _rerank_last_occurrence,
     _rerank_latest_step,
+    _rerank_linear,
     _rerank_prefer_set_latest,
     _select_entries_for_key,
+    LinearSelectorModel,
 )
 from goldevidencebench.baselines import parse_book_ledger
 from goldevidencebench.generate import EpisodeConfig, generate_dataset
@@ -128,5 +131,20 @@ def test_rerank_latest_step_picks_max_step() -> None:
         {"uid": "U000003", "step": 5},
     ]
     chosen = _rerank_latest_step(entries)
+    assert chosen is not None
+    assert chosen["uid"] == "U000002"
+
+
+def test_rerank_linear_prefers_step() -> None:
+    entries = [
+        {"uid": "U000001", "step": 2, "op": "ADD"},
+        {"uid": "U000002", "step": 10, "op": "SET"},
+        {"uid": "U000003", "step": 5, "op": "ADD"},
+    ]
+    model = LinearSelectorModel(
+        feature_order=_LINEAR_FEATURE_ORDER,
+        weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    )
+    chosen = _rerank_linear(entries, model)
     assert chosen is not None
     assert chosen["uid"] == "U000002"

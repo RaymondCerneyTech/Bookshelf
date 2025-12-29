@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -22,8 +23,26 @@ class RetrievalConfig:
     order_seed: int = 0
     query_sandwich: bool = False
     pick_then_answer: bool = False
-    rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest
+    rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest|linear
     selection_only: bool = False
+
+
+@dataclass(frozen=True)
+class LinearSelectorModel:
+    feature_order: list[str]
+    weights: list[float]
+
+
+_LINEAR_FEATURE_ORDER = [
+    "bias",
+    "step_norm",
+    "pos_norm",
+    "is_set",
+    "is_clear",
+    "is_add",
+    "is_remove",
+    "is_note",
+]
 
 
 def _sorted_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -129,6 +148,58 @@ def _rerank_prefer_set_latest(entries: list[dict[str, Any]]) -> dict[str, Any] |
     return max(candidates, key=lambda e: int(e.get("step", -1)))
 
 
+def _linear_features(
+    *, entry: dict[str, Any], index: int, total: int, max_step: int
+) -> list[float]:
+    step = int(entry.get("step", 0))
+    step_norm = step / max_step if max_step else 0.0
+    pos_norm = index / (total - 1) if total > 1 else 0.0
+    op = str(entry.get("op", "")).upper()
+    return [
+        1.0,
+        step_norm,
+        pos_norm,
+        1.0 if op == "SET" else 0.0,
+        1.0 if op == "CLEAR" else 0.0,
+        1.0 if op == "ADD" else 0.0,
+        1.0 if op == "REMOVE" else 0.0,
+        1.0 if op == "NOTE" else 0.0,
+    ]
+
+
+def _rerank_linear(
+    entries: list[dict[str, Any]], model: LinearSelectorModel
+) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    if model.feature_order != _LINEAR_FEATURE_ORDER:
+        raise ValueError("Linear selector feature_order mismatch.")
+    max_step = max(int(entry.get("step", 0)) for entry in entries)
+    scores: list[tuple[float, dict[str, Any]]] = []
+    for index, entry in enumerate(entries):
+        features = _linear_features(
+            entry=entry, index=index, total=len(entries), max_step=max_step
+        )
+        score = sum(weight * feature for weight, feature in zip(model.weights, features))
+        scores.append((score, entry))
+    scores.sort(key=lambda item: item[0], reverse=True)
+    return scores[0][1]
+
+
+def _load_linear_model(path: str) -> LinearSelectorModel:
+    payload = json.loads(open(path, "r", encoding="utf-8").read())
+    feature_order = payload.get("feature_order")
+    weights = payload.get("weights")
+    if not isinstance(feature_order, list) or not isinstance(weights, list):
+        raise ValueError("Invalid linear selector model format.")
+    if len(weights) != len(feature_order):
+        raise ValueError("Linear selector weights length mismatch.")
+    return LinearSelectorModel(
+        feature_order=[str(item) for item in feature_order],
+        weights=[float(item) for item in weights],
+    )
+
+
 def _build_min_book(*, entry: dict[str, Any], key: str, episode_id: str) -> str:
     ledger = [
         LedgerEntry(
@@ -220,6 +291,7 @@ class RetrievalLlamaCppAdapter:
         pick_env = get_env("RETRIEVAL_PICK_THEN_ANSWER", "0").strip().lower()
         rerank_env = get_env("RETRIEVAL_RERANK", "none").strip().lower()
         selection_only_env = get_env("RETRIEVAL_SELECTOR_ONLY", "0").strip().lower()
+        linear_model_env = get_env("RETRIEVAL_LINEAR_MODEL", "").strip()
         try:
             k_val = int(k_env)
         except ValueError:
@@ -251,7 +323,7 @@ class RetrievalLlamaCppAdapter:
             rerank_mode=(
                 rerank_env
                 if rerank_env
-                in {"none", "latest_step", "last_occurrence", "prefer_set_latest"}
+                in {"none", "latest_step", "last_occurrence", "prefer_set_latest", "linear"}
                 else "none"
             ),
             selection_only=selection_only_env in {"1", "true", "yes"},
@@ -271,6 +343,12 @@ class RetrievalLlamaCppAdapter:
                 selection_only=True,
             )
         from goldevidencebench.adapters.llama_cpp_adapter import LlamaCppAdapter
+
+        self._linear_model: LinearSelectorModel | None = None
+        if self.cfg.rerank_mode == "linear":
+            if not linear_model_env:
+                raise ValueError("RETRIEVAL_LINEAR_MODEL is required for rerank_mode=linear.")
+            self._linear_model = _load_linear_model(linear_model_env)
 
         self._answerer = (
             None
@@ -350,6 +428,12 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_last_occurrence(selected)
             elif self.cfg.rerank_mode == "prefer_set_latest":
                 chosen = _rerank_prefer_set_latest(selected)
+            elif self.cfg.rerank_mode == "linear":
+                chosen = (
+                    _rerank_linear(selected, self._linear_model)
+                    if self._linear_model is not None
+                    else None
+                )
             else:
                 chosen = None
             self._last_diag = {
@@ -428,6 +512,12 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_last_occurrence(selected)
             elif self.cfg.rerank_mode == "prefer_set_latest":
                 chosen = _rerank_prefer_set_latest(selected)
+            elif self.cfg.rerank_mode == "linear":
+                chosen = (
+                    _rerank_linear(selected, self._linear_model)
+                    if self._linear_model is not None
+                    else None
+                )
             else:
                 chosen = None
             self._last_diag = {

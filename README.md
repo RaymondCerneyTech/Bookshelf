@@ -39,6 +39,21 @@ Correct evidence is Update 2 (99 Pine Ave). The NOTE is contextual but not autho
 
 Everything else in this README is an extension or deeper dive.
 
+## Selector training (optional but powerful)
+
+Train a tiny linear selector from generated data (no extra dependencies):
+
+```powershell
+python .\scripts\export_selector_dataset.py --data .\data\goldevidencebench.jsonl --out .\data\selector_train.jsonl --k 4 --wrong-type same_key --order shuffle
+python .\scripts\train_selector_linear.py --data .\data\selector_train.jsonl --out .\models\linear_selector.json
+
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_RERANK="linear"
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL=".\models\linear_selector.json"
+```
+
+Use this when you want a learned selector instead of a fixed heuristic.
+Example training result (default settings): train_selection_rate 0.9401, test_selection_rate 0.9403.
+
 ## Headline results (summary)
 
 Selection under ambiguity is the bottleneck. Simple deterministic selection outperforms the LLM as candidate lists grow.
@@ -273,6 +288,18 @@ Selector-only (fast selection metrics, skip LLM answers):
 
 Use this when tuning selector policies. It skips answer generation and only emits `support_ids`, so the relevant numbers are `gold_present_rate` and `selection_rate` (value accuracy is not meaningful in this mode).
 
+Train a linear selector (no extra deps):
+
+```powershell
+python .\scripts\export_selector_dataset.py --data .\data\goldevidencebench.jsonl --out .\data\selector_train.jsonl --k 4 --wrong-type same_key --order shuffle
+python .\scripts	rain_selector_linear.py --data .\data\selector_train.jsonl --out .\models\linear_selector.json
+
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_RERANK="linear"
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL=".\models\linear_selector.json"
+```
+
+The linear selector learns a small scoring function over candidate lines (step, position, op). Use `selection_rate` to compare against `none` or `latest_step`.
+
 This is much faster because it emits only `support_ids`. Use `gold_present_rate` and `selection_rate` for analysis.
 
 Estimate runtime before a sweep:
@@ -380,8 +407,9 @@ Set `GOLDEVIDENCEBENCH_RETRIEVAL_QUERY_SANDWICH=1` to repeat the question before
 candidate ledger lines (query sandwich mitigation).
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_PICK_THEN_ANSWER=1` to force a two-step flow: pick a support_id
 first, then answer using only that line.
-Set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=latest_step|last_occurrence|prefer_set_latest` to deterministically
-choose a candidate before answering (non-LLM selector baseline).
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=latest_step|last_occurrence|prefer_set_latest|linear` to deterministically
+choose a candidate before answering (non-LLM selector baseline). For `linear`, also set
+`GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL` to the JSON model file from `train_selector_linear.py`.
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_SELECTOR_ONLY=1` to skip answer generation and emit only `support_ids`.
 Use selection metrics (`gold_present_rate`, `selection_rate`) for speed-focused iterations; value accuracy is not meaningful
 in selector-only mode.
