@@ -12,6 +12,7 @@ from goldevidencebench.adapters.retrieval_llama_cpp_adapter import (
     _rerank_latest_step,
     _rerank_linear,
     _rerank_prefer_set_latest,
+    _rerank_prefer_update_latest,
     _select_entries_for_key,
     LinearSelectorModel,
 )
@@ -123,6 +124,24 @@ def test_rerank_prefer_set_latest_prefers_set() -> None:
     assert chosen is not None
     assert chosen["uid"] == "U000002"
 
+def test_rerank_prefer_update_latest_ignores_note() -> None:
+    entries = [
+        {"uid": "U000001", "step": 5, "op": "NOTE"},
+        {"uid": "U000002", "step": 4, "op": "SET"},
+    ]
+    chosen = _rerank_prefer_update_latest(entries)
+    assert chosen is not None
+    assert chosen["uid"] == "U000002"
+
+    only_notes = [
+        {"uid": "U000010", "step": 7, "op": "NOTE"},
+        {"uid": "U000011", "step": 2, "op": "NOTE"},
+    ]
+    chosen = _rerank_prefer_update_latest(only_notes)
+    assert chosen is not None
+    assert chosen["uid"] == "U000010"
+
+
 
 def test_rerank_latest_step_picks_max_step() -> None:
     entries = [
@@ -143,8 +162,11 @@ def test_rerank_linear_prefers_step() -> None:
     ]
     model = LinearSelectorModel(
         feature_order=_LINEAR_FEATURE_ORDER,
-        weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        weights=[0.0] * len(_LINEAR_FEATURE_ORDER),
     )
-    chosen = _rerank_linear(entries, model)
+    weights = list(model.weights)
+    weights[_LINEAR_FEATURE_ORDER.index("step_norm")] = 1.0
+    model = LinearSelectorModel(feature_order=_LINEAR_FEATURE_ORDER, weights=weights)
+    chosen = _rerank_linear(entries, model, question="what is the tag", key="T0")
     assert chosen is not None
     assert chosen["uid"] == "U000002"

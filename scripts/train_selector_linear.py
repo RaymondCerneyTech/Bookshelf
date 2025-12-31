@@ -51,7 +51,9 @@ def _build_examples(path: Path) -> list[dict[str, object]]:
     return examples
 
 
-def _score_candidates(candidates: list[dict[str, object]], weights: list[float]) -> list[float]:
+def _score_candidates(
+    candidates: list[dict[str, object]], weights: list[float], *, question: str, key: str
+) -> list[float]:
     max_step = max(int(candidate.get("step", 0)) for candidate in candidates)
     scores: list[float] = []
     for index, candidate in enumerate(candidates):
@@ -60,6 +62,8 @@ def _score_candidates(candidates: list[dict[str, object]], weights: list[float])
             index=index,
             total=len(candidates),
             max_step=max_step,
+            question=question,
+            key=key,
         )
         scores.append(_dot(weights, feats))
     return scores
@@ -71,7 +75,7 @@ def _selection_rate(rows: list[dict[str, object]], weights: list[float]) -> floa
     correct = 0
     for row in rows:
         candidates = row.get("candidates") or []
-        scores = _score_candidates(candidates, weights)
+        scores = _score_candidates(candidates, weights, question=row.get("question", ""), key=row.get("key", ""))
         best_idx = max(range(len(scores)), key=lambda i: scores[i])
         if candidates[best_idx].get("uid") == row.get("correct_uid"):
             correct += 1
@@ -97,7 +101,7 @@ def main() -> int:
         rng.shuffle(train_rows)
         for row in train_rows:
             candidates = row.get("candidates") or []
-            scores = _score_candidates(candidates, weights)
+            scores = _score_candidates(candidates, weights, question=row.get("question", ""), key=row.get("key", ""))
             probs = _softmax(scores)
             max_step = max(int(candidate.get("step", 0)) for candidate in candidates)
             for index, candidate in enumerate(candidates):
@@ -106,6 +110,8 @@ def main() -> int:
                     index=index,
                     total=len(candidates),
                     max_step=max_step,
+                    question=row.get("question", ""),
+                    key=row.get("key", ""),
                 )
                 target = 1.0 if candidate.get("uid") == row.get("correct_uid") else 0.0
                 error = probs[index] - target

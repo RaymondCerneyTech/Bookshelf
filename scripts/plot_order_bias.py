@@ -26,11 +26,23 @@ def parse_args() -> argparse.Namespace:
         help="Substring to match in run_name.",
     )
     parser.add_argument(
+        "--suffix",
+        type=str,
+        default="s5q24_llm",
+        help="Optional run_name suffix to match; set empty to disable.",
+    )
+    parser.add_argument(
         "--metric",
         type=str,
         default="selection_rate",
         choices=("selection_rate", "accuracy_when_gold_present", "value_acc"),
         help="Metric to plot.",
+    )
+    parser.add_argument(
+        "--title",
+        type=str,
+        default="Order bias (LLM-only, k=4, same_key, s5q24)",
+        help="Plot title.",
     )
     return parser.parse_args()
 
@@ -44,7 +56,7 @@ def main() -> int:
             run_name = row.get("run_name", "")
             if args.pattern not in run_name:
                 continue
-            if not run_name.endswith("s5q24_llm"):
+            if args.suffix and not run_name.endswith(args.suffix):
                 continue
             rows.append(row)
 
@@ -54,15 +66,18 @@ def main() -> int:
         )
 
     order_map = {}
+    orders = ["gold_first", "gold_middle", "gold_last", "shuffle"]
     for row in rows:
         run_name = row.get("run_name", "")
-        order = run_name.split("order_bias_")[1].split("_k4")[0]
+        tail = run_name.split(args.pattern, 1)[1]
+        order = next((name for name in orders if tail.startswith(name)), None)
+        if not order:
+            continue
         try:
             order_map[order] = float(row[args.metric])
         except (TypeError, ValueError):
             order_map[order] = 0.0
 
-    orders = ["gold_first", "gold_middle", "gold_last", "shuffle"]
     values = [order_map.get(order, 0.0) for order in orders]
 
     fig, ax = plt.subplots(figsize=(6.8, 3.8))
@@ -70,7 +85,7 @@ def main() -> int:
     ax.set_ylim(0, 1.05)
     ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
     ax.set_ylabel(args.metric)
-    ax.set_title("Order bias (LLM-only, k=4, same_key, s5q24)")
+    ax.set_title(args.title)
     ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.6)
     for bar, value in zip(bars, values):
         ax.text(

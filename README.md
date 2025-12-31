@@ -39,6 +39,22 @@ Correct evidence is Update 2 (99 Pine Ave). The NOTE is contextual but not autho
 
 Everything else in this README is an extension or deeper dive.
 
+## Research use (reproducible runs)
+
+Use this if you want publishable, comparable results:
+
+- Freeze a preset (seeds/steps/queries/k/order/drop_prob) and name it in the paper.
+- Run the canonical command once per model and keep the output under `runs/reference_v1/`.
+- Report the decomposition line: `gold_present_rate -> selection_rate -> accuracy_when_gold_present -> overall accuracy`.
+- Record the model path, commit hash, and command used with each run.
+
+Suggested v1 reporting convention:
+
+- Benchmark version: v1.0 (frozen presets + metrics)
+- Model: <name/quant>
+- Command: <exact command>
+- Outputs: `runs/summary_all.csv`, plus the figure/table in the README
+
 ## Selector training (optional but powerful)
 
 Train a tiny linear selector from generated data (no extra dependencies):
@@ -52,7 +68,31 @@ $env:GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL=".\models\linear_selector.json"
 ```
 
 Use this when you want a learned selector instead of a fixed heuristic.
-Example training result (default settings): train_selection_rate 0.9401, test_selection_rate 0.9403.
+Example training result (default settings): train_selection_rate 1.0000, test_selection_rate 1.0000.
+
+Observed A/B (s3q16, same settings):
+
+| mode | selection_rate | accuracy_when_gold_present | value_acc |
+| --- | --- | --- | --- |
+| LLM-only (none) | 0.3125 | 0.2292 | 0.2292 |
+| linear selector | 0.5000 | 0.4375 | 0.4375 |
+
+This shows a clear, tangible improvement from training the selector.
+Re-run with higher seeds/queries for a more stable estimate.
+
+Run a quick sweep with the trained selector:
+
+```powershell
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_RERANK="linear"
+$env:GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL=".\models\linear_selector.json"
+
+$outDir = "runs\linear_selector_quick"
+goldevidencebench sweep --out $outDir --seeds 1 --episodes 1 --steps 80 --queries 8 `
+  --state-modes kv --distractor-profiles standard `
+  --adapter goldevidencebench.adapters.retrieval_llama_cpp_adapter:create_adapter --no-derived-queries `
+  --no-twins --require-citations --results-json "$outDir\combined.json" --max-book-tokens 400
+python .\scripts\summarize_results.py --in "$outDir\combined.json" --out-json "$outDir\summary.json"
+```
 
 ## Headline results (summary)
 
@@ -528,6 +568,8 @@ Reranker baseline (same_key, k=4, shuffle, s3q16):
 
 Selector failure mode (kv_commentary: NOTE lines are non-authoritative):
 
+NOTE-aware rerank: set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=prefer_update_latest` to ignore NOTE lines unless no UPDATE-style lines exist.
+
 ```powershell
 $env:GOLDEVIDENCEBENCH_RETRIEVAL_RERANK = "latest_step"
 $env:GOLDEVIDENCEBENCH_RETRIEVAL_K = "4"
@@ -549,8 +591,74 @@ KV commentary sanity check (from runs/summary_all.csv, matched A/B: same seeds +
 
 Matched A/B shows `latest_step` maximizes selection but can cite non-authoritative NOTE lines (entailment drops), while `prefer_set_latest` preserves entailment.
 
+KV commentary selector A/B (s3q16, k=4, same_key, shuffle):
+
+| preset | k | rerank | gold_present | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| custom | 4 | latest_step | 1.0 | 1.0 | 0.7292 | 0.7292 | 0.8542 |
+| custom | 4 | prefer_set_latest | 1.0 | 0.7292 | 1.0 | 1.0 | 1.0 |
+| custom | 4 | prefer_update_latest | 1.0 | 0.7292 | 1.0 | 1.0 | 1.0 |
+| custom | 4 | linear | 1.0 | 1.0 | 0.7292 | 0.7292 | 0.8542 |
+
+In kv_commentary, `prefer_set_latest` and `prefer_update_latest` keep end-to-end accuracy/entailment perfect even though selection_rate is lower, while the linear selector always chooses the gold line but still produces incorrect answers in ~27% of cases. This suggests the linear model is not robust to NOTE-line noise yet.
+
+KV commentary selector bake-off (s5q24, k=4, same_key, shuffle):
+
+| preset | k | rerank | gold_present | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| custom | 4 | prefer_set_latest | 1.0 | 0.5833 | 1.0 | 1.0 | 1.0 |
+| custom | 4 | prefer_update_latest | 1.0 | 0.5833 | 1.0 | 1.0 | 1.0 |
+| custom | 4 | linear | 1.0 | 0.9833 | 0.5667 | 0.5667 | 0.7250 |
+
+At s5q24, NOTE-aware deterministic policies remain perfect end-to-end, while the linear selector still loses accuracy and entailment despite near-perfect selection.
+
+KV selector bake-off (s5q24, k=4, same_key, shuffle):
+
+| rerank | gold_present | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- | --- |
+| none | 1.0 | 0.3583 | 0.3583 | 0.3583 | 0.9917 |
+| latest_step | 1.0 | 1.0 | 0.9750 | 0.9750 | 0.9750 |
+| prefer_set_latest | 1.0 | 1.0 | 0.9750 | 0.9750 | 0.9750 |
+| linear | 1.0 | 1.0 | 0.9750 | 0.9750 | 0.9750 |
+
+Multi-model check (kv, latest_step, s5q24):
+
+| model | gold_present | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- | --- |
+| Qwen2.5-7B Q5_K_M | 1.0 | 1.0 | 0.9750 | 0.9750 | 0.9750 |
+| Llama-3.1-8B Q4_K_M | 1.0 | 1.0 | 0.8083 | 0.8083 | 0.8083 |
+
+Even with identical retrieval/selection, model quality still matters for answer extraction; Qwen outperforms Llama here.
+
+![KV model check (latest_step, s5q24)](docs/figures/model_compare_kv_latest_step_s5q24.png)
+
+Linear selector order generalization (kv_commentary, k=4, s5q24):
+
+| order | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- |
+| gold_first | 0.9833 | 0.5667 | 0.5667 | 0.7250 |
+| gold_middle | 0.9833 | 0.5667 | 0.5667 | 0.7250 |
+| gold_last | 0.9750 | 0.5583 | 0.5583 | 0.7167 |
+| shuffle | 0.9750 | 0.5583 | 0.5583 | 0.7167 |
+
+Order effects are mostly eliminated, but NOTE authoritativeness still breaks end-to-end accuracy.
+
+![Order bias (kv_commentary, linear, k=4, s5q24)](docs/figures/order_bias_kv_commentary_linear_s5q24.png)
 
 In this mode, NOTE lines appear after real updates, so `latest_step` can fail while `prefer_set_latest` holds.
+
+Order-bias check with NOTE-aware rerank (kv_commentary, k=4, s3q16):
+
+| order | selection_rate | accuracy_when_gold_present | value_acc | entailment |
+| --- | --- | --- | --- | --- |
+| gold_first | 0.7292 | 1.0 | 1.0 | 1.0 |
+| gold_middle | 0.7292 | 1.0 | 1.0 | 1.0 |
+| gold_last | 0.7292 | 1.0 | 1.0 | 1.0 |
+| shuffle | 0.7292 | 1.0 | 1.0 | 1.0 |
+
+With `prefer_update_latest`, order bias disappears in kv_commentary while end-to-end accuracy stays perfect.
+
+![Order bias (kv_commentary, prefer_update_latest, k=4, s3q16)](docs/figures/order_bias_kv_commentary_prefer_update_s3q16.png)
 
 - rerank none: accuracy_when_gold_present 0.3333, selection_rate 0.3333
 - rerank latest_step: accuracy_when_gold_present 0.625, selection_rate 0.625

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 import random
@@ -23,7 +24,7 @@ class RetrievalConfig:
     order_seed: int = 0
     query_sandwich: bool = False
     pick_then_answer: bool = False
-    rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest|linear
+    rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest|prefer_update_latest|linear
     selection_only: bool = False
 
 
@@ -42,6 +43,11 @@ _LINEAR_FEATURE_ORDER = [
     "is_add",
     "is_remove",
     "is_note",
+    "key_in_question",
+    "value_in_question",
+    "value_token_overlap",
+    "question_len_norm",
+    "value_len_norm",
 ]
 
 
@@ -147,14 +153,47 @@ def _rerank_prefer_set_latest(entries: list[dict[str, Any]]) -> dict[str, Any] |
     candidates = set_entries if set_entries else entries
     return max(candidates, key=lambda e: int(e.get("step", -1)))
 
+def _rerank_prefer_update_latest(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    non_note = [e for e in entries if str(e.get("op", "")).upper() != "NOTE"]
+    candidates = non_note if non_note else entries
+    return max(candidates, key=lambda e: int(e.get("step", -1)))
+
+
+
+def _tokenize(text: str) -> list[str]:
+    if not text:
+        return []
+    tokens = re.sub(r"[^0-9a-zA-Z]+", " ", text.lower()).split()
+    return [tok for tok in tokens if tok]
+
 
 def _linear_features(
-    *, entry: dict[str, Any], index: int, total: int, max_step: int
+    *,
+    entry: dict[str, Any],
+    index: int,
+    total: int,
+    max_step: int,
+    question: str,
+    key: str,
 ) -> list[float]:
     step = int(entry.get("step", 0))
     step_norm = step / max_step if max_step else 0.0
     pos_norm = index / (total - 1) if total > 1 else 0.0
     op = str(entry.get("op", "")).upper()
+    question_lower = (question or "").lower()
+    value = str(entry.get("value", ""))
+    key_in_question = 1.0 if key and key.lower() in question_lower else 0.0
+    value_in_question = 1.0 if value and value.lower() in question_lower else 0.0
+    question_tokens = _tokenize(question_lower)
+    value_tokens = _tokenize(value)
+    if value_tokens:
+        overlap = len(set(value_tokens) & set(question_tokens)) / len(set(value_tokens))
+    else:
+        overlap = 0.0
+    question_len_norm = min(len(question_tokens) / 20.0, 1.0)
+    value_len_norm = min(len(value_tokens) / 10.0, 1.0)
     return [
         1.0,
         step_norm,
@@ -164,11 +203,16 @@ def _linear_features(
         1.0 if op == "ADD" else 0.0,
         1.0 if op == "REMOVE" else 0.0,
         1.0 if op == "NOTE" else 0.0,
+        key_in_question,
+        value_in_question,
+        overlap,
+        question_len_norm,
+        value_len_norm,
     ]
 
 
 def _rerank_linear(
-    entries: list[dict[str, Any]], model: LinearSelectorModel
+    entries: list[dict[str, Any]], model: LinearSelectorModel, *, question: str, key: str
 ) -> dict[str, Any] | None:
     if not entries:
         return None
@@ -178,7 +222,12 @@ def _rerank_linear(
     scores: list[tuple[float, dict[str, Any]]] = []
     for index, entry in enumerate(entries):
         features = _linear_features(
-            entry=entry, index=index, total=len(entries), max_step=max_step
+            entry=entry,
+            index=index,
+            total=len(entries),
+            max_step=max_step,
+            question=question,
+            key=key,
         )
         score = sum(weight * feature for weight, feature in zip(model.weights, features))
         scores.append((score, entry))
@@ -323,7 +372,7 @@ class RetrievalLlamaCppAdapter:
             rerank_mode=(
                 rerank_env
                 if rerank_env
-                in {"none", "latest_step", "last_occurrence", "prefer_set_latest", "linear"}
+                in {"none", "latest_step", "last_occurrence", "prefer_set_latest", "prefer_update_latest", "linear"}
                 else "none"
             ),
             selection_only=selection_only_env in {"1", "true", "yes"},
@@ -428,9 +477,11 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_last_occurrence(selected)
             elif self.cfg.rerank_mode == "prefer_set_latest":
                 chosen = _rerank_prefer_set_latest(selected)
+            elif self.cfg.rerank_mode == "prefer_update_latest":
+                chosen = _rerank_prefer_update_latest(selected)
             elif self.cfg.rerank_mode == "linear":
                 chosen = (
-                    _rerank_linear(selected, self._linear_model)
+                    _rerank_linear(selected, self._linear_model, question=row.get("question", ""), key=key)
                     if self._linear_model is not None
                     else None
                 )
@@ -512,9 +563,11 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_last_occurrence(selected)
             elif self.cfg.rerank_mode == "prefer_set_latest":
                 chosen = _rerank_prefer_set_latest(selected)
+            elif self.cfg.rerank_mode == "prefer_update_latest":
+                chosen = _rerank_prefer_update_latest(selected)
             elif self.cfg.rerank_mode == "linear":
                 chosen = (
-                    _rerank_linear(selected, self._linear_model)
+                    _rerank_linear(selected, self._linear_model, question=row.get("question", ""), key=key)
                     if self._linear_model is not None
                     else None
                 )
