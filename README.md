@@ -90,7 +90,7 @@ Where it won't self-teach well: anywhere you don't have a reliable oracle (open-
 ## v2 release notes
 - Defaults to closed-book evaluation and supports richer state modes + derived queries.
 - Added authority-aware selection (`GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER=1`) to fix kv_commentary NOTE noise.
-- Verified perfect end-to-end exact_acc (citations on) for kv_commentary using the reference system (Qwen 2.5 7B Q5_K_M, retrieval_llama_cpp_adapter, authority filter on; s3q16 + s5q24 grids, k=2/4/8).
+- Verified perfect end-to-end exact_acc (citations on) for kv_commentary using the reference system (Qwen 2.5 7B Q5_K_M, retrieval_llama_cpp_adapter, authority filter on; s3q16 + s5q24 grids, k=2/4/8). (see runs/*authfilter*; command below).
 - Added compute vs quality figure and multi-model kv comparison.
 
 ## V2 takeaway (authority-aware selection)
