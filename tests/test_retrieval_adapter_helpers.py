@@ -8,6 +8,8 @@ from goldevidencebench.adapters.retrieval_llama_cpp_adapter import (
     _apply_order,
     _build_min_book,
     _filter_authoritative,
+    _select_entries_bm25,
+    _select_entries_tfidf,
     _latest_entry_for_key,
     _rerank_last_occurrence,
     _rerank_latest_step,
@@ -84,6 +86,32 @@ def test_select_entries_for_key_with_wrong_line() -> None:
     assert selected
     assert diag["selected_count"] == len(selected)
     assert diag["correct_included"] in {True, False}
+
+def test_select_entries_bm25_prefers_query_match() -> None:
+    entries = [
+        {"uid": "U000001", "step": 1, "op": "SET", "key": "A", "value": "alpha"},
+        {"uid": "U000002", "step": 2, "op": "SET", "key": "A", "value": "beta"},
+        {"uid": "U000003", "step": 3, "op": "SET", "key": "B", "value": "gamma"},
+    ]
+    selected, diag, _ = _select_entries_bm25(entries=entries, question="beta", key="A", k=2)
+    assert diag["correct_uid"] == "U000002"
+    assert diag["correct_included"] is True
+    assert diag["correct_rank"] == 1
+    assert any(entry["uid"] == "U000002" for entry in selected)
+
+def test_select_entries_tfidf_prefers_query_match() -> None:
+    entries = [
+        {"uid": "U000001", "step": 1, "op": "SET", "key": "A", "value": "alpha"},
+        {"uid": "U000002", "step": 2, "op": "SET", "key": "A", "value": "beta"},
+        {"uid": "U000003", "step": 3, "op": "SET", "key": "B", "value": "gamma"},
+    ]
+    selected, diag, _ = _select_entries_tfidf(entries=entries, question="beta", key="A", k=2)
+    assert diag["correct_uid"] == "U000002"
+    assert diag["correct_included"] is True
+    assert diag["correct_rank"] == 1
+    assert any(entry["uid"] == "U000002" for entry in selected)
+
+
 
 
 def test_apply_drop_with_rng_removes_correct() -> None:

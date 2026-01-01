@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import math
 from dataclasses import dataclass
 from typing import Any
 import random
@@ -18,6 +19,7 @@ class RetrievalConfig:
     include_clear: bool = True
     k: int = 1
     wrong_type: str = "none"  # none|same_key|other_key
+    retriever_mode: str = "key"  # key|bm25|tfidf
     drop_prob: float = 0.0
     drop_seed: int = 0
     order: str = "shuffle"  # shuffle|gold_first|gold_middle|gold_last
@@ -177,6 +179,127 @@ def _tokenize(text: str) -> list[str]:
         return []
     tokens = re.sub(r"[^0-9a-zA-Z]+", " ", text.lower()).split()
     return [tok for tok in tokens if tok]
+
+
+def _entry_text(entry: dict[str, Any]) -> str:
+    return f"{entry.get('op','')} {entry.get('key','')} {entry.get('value','')}"
+
+
+def _bm25_scores(entries: list[dict[str, Any]], query: str) -> list[float]:
+    docs = [_tokenize(_entry_text(entry)) for entry in entries]
+    query_tokens = _tokenize(query)
+    if not docs:
+        return []
+    if not query_tokens:
+        return [0.0 for _ in docs]
+    doc_lens = [len(doc) for doc in docs]
+    avgdl = sum(doc_lens) / len(doc_lens) if doc_lens else 0.0
+    df: dict[str, int] = {}
+    for doc in docs:
+        for tok in set(doc):
+            df[tok] = df.get(tok, 0) + 1
+    k1 = 1.5
+    b = 0.75
+    scores: list[float] = []
+    for doc, dl in zip(docs, doc_lens):
+        score = 0.0
+        for tok in query_tokens:
+            n = df.get(tok, 0)
+            if n == 0:
+                continue
+            idf = math.log((len(docs) - n + 0.5) / (n + 0.5) + 1.0)
+            tf = doc.count(tok)
+            denom = tf + k1 * (1.0 - b + b * (dl / avgdl if avgdl else 0.0))
+            score += idf * ((tf * (k1 + 1.0)) / denom)
+        scores.append(score)
+    return scores
+
+
+def _select_entries_bm25(
+    *, entries: list[dict[str, Any]], question: str, key: str, k: int
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    key_entries = [e for e in entries if e.get('key') == key]
+    sorted_key = _sorted_entries(key_entries)
+    correct = sorted_key[0] if sorted_key else None
+    scores = _bm25_scores(entries, question)
+    ranked_indices = sorted(range(len(entries)), key=lambda i: scores[i], reverse=True)
+    selected = [entries[i] for i in ranked_indices[: max(1, k)]]
+    selected_sorted = sorted(selected, key=lambda e: int(e.get('step', -1)))
+    correct_rank = None
+    if correct and correct in selected:
+        correct_rank = 1 + ranked_indices[: max(1, k)].index(entries.index(correct))
+    diag = {
+        'k': k,
+        'wrong_type': 'bm25',
+        'correct_uid': correct.get('uid') if correct else None,
+        'correct_included': correct in selected if correct else False,
+        'correct_rank': correct_rank,
+        'selected_count': len(selected),
+    }
+    return selected_sorted, diag, None
+
+
+def _tfidf_vectors(entries: list[dict[str, Any]], query: str) -> tuple[list[dict[str, float]], dict[str, float]]:
+    docs = [_tokenize(_entry_text(entry)) for entry in entries]
+    query_tokens = _tokenize(query)
+    if not docs:
+        return [], {}
+    df: dict[str, int] = {}
+    for doc in docs:
+        for tok in set(doc):
+            df[tok] = df.get(tok, 0) + 1
+    n_docs = len(docs)
+    idf = {tok: math.log((n_docs + 1) / (df_val + 1)) + 1.0 for tok, df_val in df.items()}
+    doc_vecs: list[dict[str, float]] = []
+    for doc in docs:
+        vec: dict[str, float] = {}
+        for tok in doc:
+            vec[tok] = vec.get(tok, 0.0) + 1.0
+        for tok in list(vec.keys()):
+            vec[tok] = vec[tok] * idf.get(tok, 0.0)
+        doc_vecs.append(vec)
+    query_vec: dict[str, float] = {}
+    for tok in query_tokens:
+        query_vec[tok] = query_vec.get(tok, 0.0) + 1.0
+    for tok in list(query_vec.keys()):
+        query_vec[tok] = query_vec[tok] * idf.get(tok, 0.0)
+    return doc_vecs, query_vec
+
+
+def _cosine_similarity(a: dict[str, float], b: dict[str, float]) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(val * b.get(tok, 0.0) for tok, val in a.items())
+    na = math.sqrt(sum(val * val for val in a.values()))
+    nb = math.sqrt(sum(val * val for val in b.values()))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _select_entries_tfidf(
+    *, entries: list[dict[str, Any]], question: str, key: str, k: int
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    key_entries = [e for e in entries if e.get('key') == key]
+    sorted_key = _sorted_entries(key_entries)
+    correct = sorted_key[0] if sorted_key else None
+    doc_vecs, query_vec = _tfidf_vectors(entries, question)
+    scores = [_cosine_similarity(vec, query_vec) for vec in doc_vecs]
+    ranked_indices = sorted(range(len(entries)), key=lambda i: scores[i], reverse=True)
+    selected = [entries[i] for i in ranked_indices[: max(1, k)]]
+    selected_sorted = sorted(selected, key=lambda e: int(e.get('step', -1)))
+    correct_rank = None
+    if correct and correct in selected:
+        correct_rank = 1 + ranked_indices[: max(1, k)].index(entries.index(correct))
+    diag = {
+        'k': k,
+        'wrong_type': 'tfidf',
+        'correct_uid': correct.get('uid') if correct else None,
+        'correct_included': correct in selected if correct else False,
+        'correct_rank': correct_rank,
+        'selected_count': len(selected),
+    }
+    return selected_sorted, diag, None
 
 
 def _linear_features(
@@ -353,6 +476,7 @@ class RetrievalLlamaCppAdapter:
         drop_seed_env = get_env("RETRIEVAL_DROP_SEED", "0").strip()
         order_env = get_env("RETRIEVAL_ORDER", "shuffle").strip().lower()
         order_seed_env = get_env("RETRIEVAL_ORDER_SEED", "0").strip()
+        retriever_env = get_env("RETRIEVAL_RETRIEVER", "key").strip().lower()
         sandwich_env = get_env("RETRIEVAL_QUERY_SANDWICH", "0").strip().lower()
         pick_env = get_env("RETRIEVAL_PICK_THEN_ANSWER", "0").strip().lower()
         rerank_env = get_env("RETRIEVAL_RERANK", "none").strip().lower()
@@ -373,6 +497,8 @@ class RetrievalLlamaCppAdapter:
             drop_seed = 0
         if order_env not in {"shuffle", "gold_first", "gold_middle", "gold_last"}:
             order_env = "shuffle"
+        if retriever_env not in {"key", "bm25", "tfidf"}:
+            retriever_env = "key"
         try:
             order_seed = int(order_seed_env)
         except ValueError:
@@ -381,6 +507,7 @@ class RetrievalLlamaCppAdapter:
             include_clear=include_clear_env not in {"0", "false", "no"},
             k=max(1, k_val),
             wrong_type=wrong_type,
+            retriever_mode=retriever_env,
             drop_prob=max(0.0, min(1.0, drop_prob)),
             drop_seed=drop_seed,
             order=order_env,
@@ -401,6 +528,7 @@ class RetrievalLlamaCppAdapter:
                 include_clear=self.cfg.include_clear,
                 k=self.cfg.k,
                 wrong_type=self.cfg.wrong_type,
+                retriever_mode=self.cfg.retriever_mode,
                 drop_prob=self.cfg.drop_prob,
                 drop_seed=self.cfg.drop_seed,
                 order=self.cfg.order,
@@ -464,9 +592,18 @@ class RetrievalLlamaCppAdapter:
             entries = _filter_authoritative(entries)
             if not entries:
                 return self._empty_output()
-        selected, diag, wrong_entry = _select_entries_for_key(
-            entries=entries, key=key, k=self.cfg.k, wrong_type=self.cfg.wrong_type
-        )
+        if self.cfg.retriever_mode == "bm25":
+            selected, diag, wrong_entry = _select_entries_bm25(
+                entries=entries, question=row.get("question", ""), key=key, k=self.cfg.k
+            )
+        elif self.cfg.retriever_mode == "tfidf":
+            selected, diag, wrong_entry = _select_entries_tfidf(
+                entries=entries, question=row.get("question", ""), key=key, k=self.cfg.k
+            )
+        else:
+            selected, diag, wrong_entry = _select_entries_for_key(
+                entries=entries, key=key, k=self.cfg.k, wrong_type=self.cfg.wrong_type
+            )
         rng = random.Random(self.cfg.drop_seed ^ hash(row.get("id", "")))
         selected, dropped = _apply_drop_with_rng(
             selected=selected,
@@ -547,9 +684,18 @@ class RetrievalLlamaCppAdapter:
             entries = _filter_authoritative(entries)
             if not entries:
                 return self._answerer.predict(row, protocol=protocol)
-        selected, diag, wrong_entry = _select_entries_for_key(
-            entries=entries, key=key, k=self.cfg.k, wrong_type=self.cfg.wrong_type
-        )
+        if self.cfg.retriever_mode == "bm25":
+            selected, diag, wrong_entry = _select_entries_bm25(
+                entries=entries, question=row.get("question", ""), key=key, k=self.cfg.k
+            )
+        elif self.cfg.retriever_mode == "tfidf":
+            selected, diag, wrong_entry = _select_entries_tfidf(
+                entries=entries, question=row.get("question", ""), key=key, k=self.cfg.k
+            )
+        else:
+            selected, diag, wrong_entry = _select_entries_for_key(
+                entries=entries, key=key, k=self.cfg.k, wrong_type=self.cfg.wrong_type
+            )
         rng = random.Random(self.cfg.drop_seed ^ hash(row.get("id", "")))
         selected, dropped = _apply_drop_with_rng(
             selected=selected,

@@ -663,8 +663,6 @@ See `docs/ADAPTERS.md` for the full adapter contract, supported adapters, and tu
 
 ### Efficiency snapshot (ledger baseline, 1 episode, steps=150, queries=12, distractor_profile=instruction)
 
-These are baseline scores (not the LLM-only selector), shown to illustrate cost/latency, not ambiguity failure.
-
 Closed-book (headline metric):
 
 | state_mode | exact_acc | tokens/query |

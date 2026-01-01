@@ -46,15 +46,11 @@ Correct evidence is Update 2 (99 Pine Ave). The NOTE is contextual but not autho
 
 Headline metric: closed-book exact_acc with citations on (use value_acc when citations are off for quick iteration).
 
-Preset standard runs with --require-citations.
-
 2) Read the result table in `runs/summary_all.csv` (it matches the "Reference proof" section below).
 
 3) Takeaways: selection under ambiguity fails for LLM-only; a deterministic selector fixes it; order bias disappears with selection.
 
 Everything else in this README is an extension or deeper dive.
-
-If selection is the bottleneck, run `scripts/run_selector_only.ps1`; if gold_present is low, run the BM25/TF-IDF baselines to confirm retrieval issues.
 
 ## Goal: a self-teaching gym for evidence selection
 
@@ -89,13 +85,17 @@ Where it won't self-teach well: anywhere you don't have a reliable oracle (open-
 
 ## v2 release notes
 - Defaults to closed-book evaluation and supports richer state modes + derived queries.
+- Adds adversarial distractors (instruction injection, format traps, stale-echo repeats).
+- Uses non-monotonic UPDATE IDs and counterfactual twins; reports twin metrics + support_bloat.
+- `goldevidencebench run` prints an efficiency curve (tokens/query, passes, wall time).
 - Added authority-aware selection (`GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER=1`) to fix kv_commentary NOTE noise.
 - Verified perfect end-to-end exact_acc (citations on) for kv_commentary using the reference system (Qwen 2.5 7B Q5_K_M, retrieval_llama_cpp_adapter, authority filter on; s3q16 + s5q24 grids, k=2/4/8).
 - Added compute vs quality figure and multi-model kv comparison.
+- Expanded selector bake-off tables and kv_commentary grids.
 
 ## V2 takeaway (authority-aware selection)
 
-In kv_commentary, the dominant failure is *authoritativeness*, not selection or attribution. Adding `GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER=1` (drop NOTE lines before selection) restores perfect end-to-end accuracy in the kv_commentary grids (s3q16 + s5q24, k=2/4/8) for the reference system (Qwen 2.5 7B Q5_K_M, retrieval_llama_cpp_adapter). This is now the recommended default for kv_commentary.
+In kv_commentary, the dominant failure is *authoritativeness*, not selection or reasoning. Adding `GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER=1` (drop NOTE lines before selection) restores perfect end-to-end accuracy in the kv_commentary grids (s3q16 + s5q24, k=2/4/8) for the reference system (Qwen 2.5 7B Q5_K_M, retrieval_llama_cpp_adapter). This is now the recommended default for kv_commentary.
 Runs: `runs/kv_commentary_grid_linear_authfilter_k{2,4,8}_s3q16` and `runs/kv_commentary_grid_linear_authfilter_k{2,4,8}_s5q24`.
 Command (s3q16 example):
 
@@ -292,8 +292,6 @@ python .\scripts\summarize_results.py --in "$outDir\combined.json" --out-json "$
 ## Headline results (summary)
 
 Selection under ambiguity is the bottleneck. Simple deterministic selection outperforms the LLM as candidate lists grow.
-
-See rows `ambig_*` and `ab_rerank_*` in `runs/summary_all.csv` for the exact numbers.
 
 | Finding | Evidence |
 | --- | --- |
@@ -662,8 +660,6 @@ See `docs/ADAPTERS.md` for the full adapter contract, supported adapters, and tu
 - Instruction-injection resistance is measured via `instr_acc`/`instr_gap`; answers derived from instruction lines are not authoritative.
 
 ### Efficiency snapshot (ledger baseline, 1 episode, steps=150, queries=12, distractor_profile=instruction)
-
-These are baseline scores (not the LLM-only selector), shown to illustrate cost/latency, not ambiguity failure.
 
 Closed-book (headline metric):
 
