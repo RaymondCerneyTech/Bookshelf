@@ -140,52 +140,6 @@ Canonical v2 default: authority filter (hard gate) + `prefer_update_latest` (sof
 
 ## V3 plan (NOTE robustness + authority spoofing)
 
-**V3-D: UPDATE-vs-UPDATE disambiguation + abstain**
-
-Matrix (filter ON/OFF ? spoof_rate ? k):
-
-```powershell
-$env:GOLDEVIDENCEBENCH_RETRIEVAL_RERANK = "linear"
-$env:GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL = ".\models\linear_selector_note_v8.json"
-$env:GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_SPOOF_SEED = "0"
-
-foreach ($filter in @('0','1')) {
-  if ($filter -eq '1') { $env:GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER = '1' } else { Remove-Item Env:\GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_FILTER -ErrorAction SilentlyContinue }
-  foreach ($spoof in 0.1,0.5,0.8) {
-    $env:GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_SPOOF_RATE = "$spoof"
-    foreach ($k in 2,4,8) {
-      $env:GOLDEVIDENCEBENCH_RETRIEVAL_K = "$k"
-      $outDir = "runs\v3d_spoof${spoof}_filter${filter}_k${k}_s3q16"
-      goldevidencebench sweep --out $outDir --seeds 3 --episodes 1 --steps 240 --queries 16 `
-        --state-modes kv_commentary --distractor-profiles standard `
-        --adapter goldevidencebench.adapters.retrieval_llama_cpp_adapter:create_adapter --no-derived-queries `
-        --no-twins --require-citations --results-json "$outDir\combined.json" `
-        --max-book-tokens 400 --note-rate 0.30
-      python .\scripts\summarize_results.py --in "$outDir\combined.json" --out-json "$outDir\summary.json"
-    }
-  }
-}
-```
-
-Report: wrong_update_rate, spoof_accept_rate_non_gold, value_acc, and abstain precision/recall (if enabled).
-
-V3-D matrix summary (v8 selector, s3q16):
-
-| filter | spoof_rate | k | value_acc | selected_note_rate | wrong_update_rate | spoof_accept_rate_non_gold |
-| --- | --- | --- | --- | --- | --- | --- |
-| off | 0.1 | 2/4/8 | 0.6875 | 0.3125 | 0.0000 | 0.0000 |
-| off | 0.5 | 2/4/8 | 0.6875 | 0.3125 | 0.0000 | 0.0000 |
-| off | 0.8 | 2/4/8 | 0.6875 | 0.3125 | 0.0000 | 0.0000 |
-| on | 0.1 | 2/4/8 | 1.0000 | 0.0000 | 0.0000 | 0.0000 |
-| on | 0.5 | 2/4/8 | 1.0000 | 0.0000 | 0.0000 | 0.0000 |
-| on | 0.8 | 2/4/8 | 1.0000 | 0.0000 | 0.0000 | 0.0000 |
-
-Interpretation: spoof exposure rises with spoof_rate/k, but spoofed non-gold selections stay at 0.0; filter OFF fails only via NOTE authority violations, while filter ON is perfect across the grid.
-
-Runs: runs/v3d_spoof{0.1,0.5,0.8}_filter{0,1}_k{2,4,8}_s3q16 (18 runs total).
-
-
-
 **V3-A: Learned NOTE robustness (trusted authority field)**
 
 Train with NOTE candidates present, but label the gold UPDATE as correct using `export_selector_dataset.py --use-gold-support` so the selector learns authority, not just recency.
@@ -254,11 +208,6 @@ V3-B order generalization (v8: spoofpen+hardneg, filter ON, spoof_rate=0.5, k=4,
 Runs: runs/authority_spoof_0.5_filter1_linear_spoofpen_hardneg_{gold_first,gold_middle,gold_last,shuffle}_k4_s3q16.
 
 Interpretation: accuracy is order-invariant and spoof exposure does not cause wrong picks (spoof_accept_rate_non_gold = 0).
-
-Note: the remaining bottleneck depends on the regime. With filter ON and the v8 selector, wrong-UPDATE selection is resolved in this setting; without the filter or without hard-negative training, wrong-UPDATE and NOTE authority errors reappear.
-
-Filter-OFF check (v8, spoof_rate=0.5, k=4, s3q16): value_acc=0.6875, gold_support_selected_rate=0.6875, selected_note_rate=0.3125, spoof_accept_rate=0.625, spoof_accept_rate_non_gold=0.0.
-Interpretation: without the authority filter, the selector still avoids wrong UPDATEs but accepts NOTE lines; the hard gate remains required.
 
 
 
@@ -529,23 +478,6 @@ s5q24 (runs/order_bias_linear_*_k4_same_s5q24):
 | gold_middle | 0.583 | 0.467 |
 | gold_last | 0.542 | 0.417 |
 | shuffle | 0.583 | 0.442 |
-
-## Dense (hash) retriever baseline
-
-This is a lightweight, dependency-free dense embedding baseline using a hashing projection over token vectors.
-It is not a semantic model, but it provides a compact ?dense? retriever for comparison.
-
-Run (kv, k=4, s3q16):
-
-```powershell
-$env:GOLDEVIDENCEBENCH_RETRIEVAL_RETRIEVER="dense"
-goldevidencebench sweep --out runs\dense_kv_s3q16 --seeds 3 --episodes 1 --steps 240 --queries 16 `
-  --state-modes kv --distractor-profiles standard `
-  --adapter goldevidencebench.adapters.retrieval_llama_cpp_adapter:create_adapter --no-derived-queries `
-  --no-twins --require-citations --results-json runs\dense_kv_s3q16\combined.json `
-  --max-book-tokens 400
-python .\scripts\summarize_results.py --in runs\dense_kv_s3q16\combined.json --out-json runs\dense_kv_s3q16\summary.json
-```
 
 ## TF-IDF lexical retriever baseline
 

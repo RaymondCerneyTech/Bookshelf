@@ -4,6 +4,7 @@ import json
 import os
 import re
 import math
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 import random
@@ -19,7 +20,7 @@ class RetrievalConfig:
     include_clear: bool = True
     k: int = 1
     wrong_type: str = "none"  # none|same_key|other_key
-    retriever_mode: str = "key"  # key|bm25|tfidf
+    retriever_mode: str = "key"  # key|bm25|tfidf|dense
     drop_prob: float = 0.0
     drop_seed: int = 0
     authority_spoof_rate: float = 0.0
@@ -305,6 +306,53 @@ def _cosine_similarity(a: dict[str, float], b: dict[str, float]) -> float:
     return dot / (na * nb)
 
 
+_DENSE_DIM = 256
+
+def _dense_vector(tokens: list[str], dim: int = _DENSE_DIM) -> list[float]:
+    vec = [0.0] * dim
+    for tok in tokens:
+        digest = hashlib.md5(tok.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:4], "little") % dim
+        sign = 1.0 if (digest[4] & 1) == 0 else -1.0
+        vec[idx] += sign
+    return vec
+
+def _dense_cosine(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b:
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    na = math.sqrt(sum(a * a for a in vec_a))
+    nb = math.sqrt(sum(b * b for b in vec_b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+def _select_entries_dense(
+    *, entries: list[dict[str, Any]], question: str, key: str, k: int
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    key_entries = [e for e in entries if e.get('key') == key]
+    sorted_key = _sorted_entries(key_entries)
+    correct = sorted_key[0] if sorted_key else None
+    doc_vecs = [_dense_vector(_tokenize(_entry_text(entry))) for entry in entries]
+    query_vec = _dense_vector(_tokenize(question))
+    scores = [_dense_cosine(vec, query_vec) for vec in doc_vecs]
+    ranked_indices = sorted(range(len(entries)), key=lambda i: scores[i], reverse=True)
+    selected = [entries[i] for i in ranked_indices[: max(1, k)]]
+    selected_sorted = sorted(selected, key=lambda e: int(e.get('step', -1)))
+    correct_rank = None
+    if correct and correct in selected:
+        correct_rank = 1 + ranked_indices[: max(1, k)].index(entries.index(correct))
+    diag = {
+        'k': k,
+        'wrong_type': 'dense',
+        'correct_uid': correct.get('uid') if correct else None,
+        'correct_included': correct in selected if correct else False,
+        'correct_rank': correct_rank,
+        'selected_count': len(selected),
+    }
+    return selected_sorted, diag, None
+
+
 def _select_entries_tfidf(
     *, entries: list[dict[str, Any]], question: str, key: str, k: int
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
@@ -546,7 +594,7 @@ class RetrievalLlamaCppAdapter:
             authority_spoof_seed = 0
         if order_env not in {"shuffle", "gold_first", "gold_middle", "gold_last"}:
             order_env = "shuffle"
-        if retriever_env not in {"key", "bm25", "tfidf"}:
+        if retriever_env not in {"key", "bm25", "tfidf", "dense"}:
             retriever_env = "key"
         try:
             order_seed = int(order_seed_env)
