@@ -125,6 +125,13 @@ def _norm_support_list(value: Any) -> list[str]:
 
 
 
+def _is_abstain(pred: dict[str, Any]) -> bool:
+    value = _norm_value(pred.get("value"))
+    supports = _norm_support_list(pred.get("support_ids") or pred.get("support_id"))
+    return value is None and not supports
+
+
+
 def _entry_value_for_uid(book: str | None, uid: str | None) -> str | None:
     if not book or not uid:
         return None
@@ -184,6 +191,9 @@ def _compute_decomposition(
     selected_spoof_total = 0
     selected_spoof_ok = 0
     selected_spoof_non_gold = 0
+    abstain_total = 0
+    abstain_on_missing = 0
+    gold_missing_total = 0
     for row in data_rows:
         rid = row.get("id")
         if not rid:
@@ -192,7 +202,19 @@ def _compute_decomposition(
         if pred is None:
             continue
         diag = retrieval_by_id.get(rid)
-        if not diag or diag.get("correct_included") is not True:
+        if not diag:
+            continue
+        gold_missing = diag.get("gold_missing")
+        if gold_missing is None:
+            gold_missing = diag.get("correct_included") is not True or diag.get("dropped_correct") is True
+        abstained = diag.get("abstained") is True or _is_abstain(pred)
+        if abstained:
+            abstain_total += 1
+            if gold_missing:
+                abstain_on_missing += 1
+        if gold_missing:
+            gold_missing_total += 1
+        if diag.get("correct_included") is not True:
             continue
         included += 1
         gold_value = _norm_value(row.get("gold", {}).get("value"))
@@ -284,6 +306,10 @@ def _compute_decomposition(
         "spoof_accept_rate_non_gold": (
             selected_spoof_non_gold / selected_entry_total if selected_entry_total else None
         ),
+        "gold_missing_rate": (gold_missing_total / total if total else None),
+        "abstain_rate": (abstain_total / total if total else None),
+        "abstain_precision": (abstain_on_missing / abstain_total if abstain_total else None),
+        "abstain_recall": (abstain_on_missing / gold_missing_total if gold_missing_total else None),
     }
 
 
@@ -566,6 +592,9 @@ def main() -> int:
     selected_spoof_total = 0
     selected_spoof_ok = 0
     selected_spoof_non_gold = 0
+    abstain_total = 0
+    abstain_on_missing = 0
+    gold_missing_total = 0
     decomp_rows: list[dict[str, Any]] = []
 
     recency_rows = []
@@ -616,6 +645,10 @@ def main() -> int:
                         "wrong_update_rate": decomp.get("wrong_update_rate"),
                         "spoof_accept_rate": decomp.get("spoof_accept_rate"),
                         "spoof_accept_rate_non_gold": decomp.get("spoof_accept_rate_non_gold"),
+                        "abstain_precision": decomp.get("abstain_precision"),
+                        "abstain_recall": decomp.get("abstain_recall"),
+                        "abstain_rate": decomp.get("abstain_rate"),
+                        "gold_missing_rate": decomp.get("gold_missing_rate"),
                         "overall_value_acc": metrics.get("value_acc"),
                         "overall_exact_acc": metrics.get("exact_acc"),
                         "overall_cite_f1": metrics.get("cite_f1"),
@@ -641,7 +674,19 @@ def main() -> int:
             if pred is None:
                 continue
             diag = retrieval_by_id.get(data_row.get("id"))
-            if not diag or diag.get("correct_included") is not True:
+            if not diag:
+                continue
+            gold_missing = diag.get("gold_missing")
+            if gold_missing is None:
+                gold_missing = diag.get("correct_included") is not True or diag.get("dropped_correct") is True
+            abstained = diag.get("abstained") is True or _is_abstain(pred)
+            if abstained:
+                abstain_total += 1
+                if gold_missing:
+                    abstain_on_missing += 1
+            if gold_missing:
+                gold_missing_total += 1
+            if diag.get("correct_included") is not True:
                 continue
             gold_present_total += 1
             gold_value = _norm_value(data_row.get("gold", {}).get("value"))
@@ -739,6 +784,22 @@ def main() -> int:
         )
         retrieval_summary["spoof_accept_rate_non_gold"] = (
             selected_spoof_non_gold / selected_entry_total if selected_entry_total else None
+        )
+        retrieval_summary["gold_missing_rate"] = (
+            gold_missing_total / (gold_present_total + gold_missing_total)
+            if (gold_present_total + gold_missing_total)
+            else None
+        )
+        retrieval_summary["abstain_rate"] = (
+            abstain_total / (gold_present_total + gold_missing_total)
+            if (gold_present_total + gold_missing_total)
+            else None
+        )
+        retrieval_summary["abstain_precision"] = (
+            abstain_on_missing / abstain_total if abstain_total else None
+        )
+        retrieval_summary["abstain_recall"] = (
+            abstain_on_missing / gold_missing_total if gold_missing_total else None
         )
         overall_acc = summary.get("overall", {}).get("value_acc_mean")
         gold_rate = retrieval_summary.get("gold_present_rate")

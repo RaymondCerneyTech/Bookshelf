@@ -30,9 +30,14 @@ class RetrievalConfig:
     query_sandwich: bool = False
     pick_then_answer: bool = False
     deterministic_answerer: bool = False
+    copy_clamp: bool = False
+    abstain_on_missing: bool = False
     rerank_mode: str = "none"  # none|latest_step|last_occurrence|prefer_set_latest|prefer_update_latest|linear
     selection_only: bool = False
     authority_filter: bool = False
+    step_bucket: int = 1
+    linear_tie_break: str = "none"
+    linear_tie_eps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,10 @@ _LINEAR_FEATURE_ORDER = [
     "step_norm",
     "step_delta_norm",
     "is_latest_step",
+    "is_second_latest_step",
     "recency_rank_norm",
+    "recency_rank_inv",
+    "step_gap_range_norm",
     "pos_norm",
     "is_set",
     "is_clear",
@@ -385,18 +393,27 @@ def _linear_features(
     index: int,
     total: int,
     max_step: int,
+    step_bucket: int = 1,
     question: str,
     key: str,
 ) -> list[float]:
-    step = int(entry.get("step", 0))
+    step_bucket = max(1, int(step_bucket))
+    step = int(entry.get("step", 0)) // step_bucket
     step_norm = step / max_step if max_step else 0.0
     step_delta_norm = ((max_step - step) / max_step) if max_step else 0.0
     is_latest_step = 1.0 if step == max_step else 0.0
+    steps = sorted({int(other.get("step", 0)) // step_bucket for other in entries}, reverse=True)
+    second_latest = steps[1] if len(steps) > 1 else None
+    is_second_latest_step = 1.0 if second_latest is not None and step == second_latest else 0.0
     recency_rank = 0
     for other in entries:
-        if int(other.get("step", 0)) > step:
+        if (int(other.get("step", 0)) // step_bucket) > step:
             recency_rank += 1
     recency_rank_norm = recency_rank / (total - 1) if total > 1 else 0.0
+    recency_rank_inv = 1.0 / (1.0 + recency_rank)
+    min_step = min(int(other.get("step", 0)) // step_bucket for other in entries)
+    step_range = max(max_step - min_step, 1)
+    step_gap_range_norm = (max_step - step) / step_range
     pos_norm = index / (total - 1) if total > 1 else 0.0
     op = str(entry.get("op", "")).upper()
     question_lower = (question or "").lower()
@@ -419,7 +436,10 @@ def _linear_features(
         step_norm,
         step_delta_norm,
         is_latest_step,
+        is_second_latest_step,
         recency_rank_norm,
+        recency_rank_inv,
+        step_gap_range_norm,
         pos_norm,
         1.0 if op == "SET" else 0.0,
         1.0 if op == "CLEAR" else 0.0,
@@ -437,13 +457,21 @@ def _linear_features(
 
 
 def _rerank_linear(
-    entries: list[dict[str, Any]], model: LinearSelectorModel, *, question: str, key: str
+    entries: list[dict[str, Any]],
+    model: LinearSelectorModel,
+    *,
+    question: str,
+    key: str,
+    step_bucket: int = 1,
+    linear_tie_break: str = "none",
+    linear_tie_eps: float = 0.0,
 ) -> dict[str, Any] | None:
     if not entries:
         return None
     if model.feature_order != _LINEAR_FEATURE_ORDER:
-        raise ValueError("Linear selector feature_order mismatch.")
-    max_step = max(int(entry.get("step", 0)) for entry in entries)
+        model = _align_linear_model(model)
+    step_bucket = max(1, int(step_bucket))
+    max_step = max(int(entry.get("step", 0)) // step_bucket for entry in entries)
     scores: list[tuple[float, dict[str, Any]]] = []
     for index, entry in enumerate(entries):
         features = _linear_features(
@@ -452,14 +480,32 @@ def _rerank_linear(
             index=index,
             total=len(entries),
             max_step=max_step,
+            step_bucket=step_bucket,
             question=question,
             key=key,
         )
         score = sum(weight * feature for weight, feature in zip(model.weights, features))
         scores.append((score, entry))
     scores.sort(key=lambda item: item[0], reverse=True)
+    if linear_tie_break == "latest_step" and scores:
+        max_score = scores[0][0]
+        cutoff = max_score - max(0.0, linear_tie_eps)
+        tied = [entry for score, entry in scores if score >= cutoff]
+        if len(tied) > 1:
+            return max(tied, key=lambda e: int(e.get("step", -1)))
     return scores[0][1]
 
+
+
+def _align_linear_model(model: LinearSelectorModel) -> LinearSelectorModel:
+    if model.feature_order == _LINEAR_FEATURE_ORDER:
+        return model
+    extra = [feat for feat in model.feature_order if feat not in _LINEAR_FEATURE_ORDER]
+    if extra:
+        raise ValueError(f"Linear selector feature_order mismatch (extra features: {extra})")
+    index = {feat: idx for idx, feat in enumerate(model.feature_order)}
+    weights = [model.weights[index[feat]] if feat in index else 0.0 for feat in _LINEAR_FEATURE_ORDER]
+    return LinearSelectorModel(feature_order=list(_LINEAR_FEATURE_ORDER), weights=weights)
 
 def _load_linear_model(path: str) -> LinearSelectorModel:
     payload = json.loads(open(path, "r", encoding="utf-8").read())
@@ -469,10 +515,11 @@ def _load_linear_model(path: str) -> LinearSelectorModel:
         raise ValueError("Invalid linear selector model format.")
     if len(weights) != len(feature_order):
         raise ValueError("Linear selector weights length mismatch.")
-    return LinearSelectorModel(
+    model = LinearSelectorModel(
         feature_order=[str(item) for item in feature_order],
         weights=[float(item) for item in weights],
     )
+    return _align_linear_model(model)
 
 
 def _build_min_book(*, entry: dict[str, Any], key: str, episode_id: str) -> str:
@@ -539,6 +586,24 @@ def _norm_support_list(value: Any) -> list[str]:
     return [s] if s else []
 
 
+
+def _norm_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _value_is_substring(*, predicted: Any, entry_value: Any) -> bool:
+    predicted_text = _norm_text(predicted)
+    entry_text = _norm_text(entry_value)
+    if predicted_text is None:
+        return entry_text is None
+    if entry_text is None:
+        return False
+    return predicted_text in entry_text
+
+
 class RetrievalLlamaCppAdapter:
     """
     Retrieval-first adapter:
@@ -568,10 +633,15 @@ class RetrievalLlamaCppAdapter:
         sandwich_env = get_env("RETRIEVAL_QUERY_SANDWICH", "0").strip().lower()
         pick_env = get_env("RETRIEVAL_PICK_THEN_ANSWER", "0").strip().lower()
         deterministic_env = get_env("RETRIEVAL_DETERMINISTIC_ANSWER", "0").strip().lower()
+        copy_clamp_env = get_env("RETRIEVAL_COPY_CLAMP", "0").strip().lower()
         rerank_env = get_env("RETRIEVAL_RERANK", "none").strip().lower()
         selection_only_env = get_env("RETRIEVAL_SELECTOR_ONLY", "0").strip().lower()
         authority_filter_env = get_env("RETRIEVAL_AUTHORITY_FILTER", "0").strip().lower()
+        abstain_env = get_env("RETRIEVAL_ABSTAIN_ON_MISSING", "0").strip().lower()
         linear_model_env = get_env("RETRIEVAL_LINEAR_MODEL", "").strip()
+        step_bucket_env = get_env("RETRIEVAL_STEP_BUCKET", "1").strip()
+        linear_tie_break_env = get_env("RETRIEVAL_LINEAR_TIE_BREAK", "none").strip().lower()
+        linear_tie_eps_env = get_env("RETRIEVAL_LINEAR_TIE_EPS", "0").strip()
         try:
             k_val = int(k_env)
         except ValueError:
@@ -600,6 +670,17 @@ class RetrievalLlamaCppAdapter:
             order_seed = int(order_seed_env)
         except ValueError:
             order_seed = 0
+        try:
+            step_bucket = int(step_bucket_env)
+        except ValueError:
+            step_bucket = 1
+        step_bucket = max(1, step_bucket)
+        if linear_tie_break_env not in {"none", "latest_step"}:
+            linear_tie_break_env = "none"
+        try:
+            linear_tie_eps = float(linear_tie_eps_env)
+        except ValueError:
+            linear_tie_eps = 0.0
         self.cfg = RetrievalConfig(
             include_clear=include_clear_env not in {"0", "false", "no"},
             k=max(1, k_val),
@@ -614,6 +695,8 @@ class RetrievalLlamaCppAdapter:
             query_sandwich=sandwich_env in {"1", "true", "yes"},
             pick_then_answer=pick_env in {"1", "true", "yes"},
             deterministic_answerer=deterministic_env in {"1", "true", "yes"},
+            copy_clamp=copy_clamp_env in {"1", "true", "yes"},
+            abstain_on_missing=abstain_env in {"1", "true", "yes"},
             rerank_mode=(
                 rerank_env
                 if rerank_env
@@ -622,6 +705,9 @@ class RetrievalLlamaCppAdapter:
             ),
             selection_only=selection_only_env in {"1", "true", "yes"},
             authority_filter=authority_filter_env in {"1", "true", "yes"},
+            step_bucket=step_bucket,
+            linear_tie_break=linear_tie_break_env,
+            linear_tie_eps=max(0.0, linear_tie_eps),
         )
         if self.cfg.selection_only:
             self.cfg = RetrievalConfig(
@@ -638,29 +724,32 @@ class RetrievalLlamaCppAdapter:
                 query_sandwich=self.cfg.query_sandwich,
                 pick_then_answer=False,
                 deterministic_answerer=False,
+                copy_clamp=False,
+                abstain_on_missing=self.cfg.abstain_on_missing,
                 rerank_mode=self.cfg.rerank_mode,
                 selection_only=True,
                 authority_filter=self.cfg.authority_filter,
+                step_bucket=self.cfg.step_bucket,
+                linear_tie_break=self.cfg.linear_tie_break,
+                linear_tie_eps=self.cfg.linear_tie_eps,
             )
-        from goldevidencebench.adapters.llama_cpp_adapter import LlamaCppAdapter
-
         self._linear_model: LinearSelectorModel | None = None
         if self.cfg.rerank_mode == "linear":
             if not linear_model_env:
                 raise ValueError("RETRIEVAL_LINEAR_MODEL is required for rerank_mode=linear.")
             self._linear_model = _load_linear_model(linear_model_env)
 
-        self._answerer = (
-            None
-            if self.cfg.selection_only
-            else LlamaCppAdapter(
+        self._answerer = None
+        if not self.cfg.selection_only:
+            from goldevidencebench.adapters.llama_cpp_adapter import LlamaCppAdapter
+
+            self._answerer = LlamaCppAdapter(
                 model_path=model_path,
                 n_ctx=n_ctx,
                 n_threads=n_threads,
                 max_book_tokens=max_book_tokens,
                 query_sandwich=self.cfg.query_sandwich,
             )
-        )
         self._last_diag: dict[str, Any] | None = None
 
     @property
@@ -715,6 +804,21 @@ class RetrievalLlamaCppAdapter:
             drop_prob=self.cfg.drop_prob,
             rng=rng,
         )
+        gold_missing = dropped or diag.get("correct_included") is not True
+        if self.cfg.abstain_on_missing and gold_missing:
+            self._last_diag = {
+                "id": row.get("id"),
+                "key": key,
+                **diag,
+                "drop_prob": self.cfg.drop_prob,
+                "dropped_correct": dropped,
+                "order": None,
+                "authority_spoof_rate": self.cfg.authority_spoof_rate,
+                "authority_spoof_count": 0,
+                "gold_missing": True,
+                "abstained": True,
+            }
+            return self._empty_output()
         order_applied = None
         if self.cfg.order == "shuffle" and len(selected) > 1:
             shuffle_rng = random.Random(self.cfg.order_seed ^ hash(row.get("id", "")))
@@ -739,6 +843,8 @@ class RetrievalLlamaCppAdapter:
             "order": order_applied,
             "authority_spoof_rate": self.cfg.authority_spoof_rate,
             "authority_spoof_count": spoofed_count,
+            "gold_missing": gold_missing,
+            "abstained": False,
         }
         if not selected:
             return self._empty_output()
@@ -753,7 +859,15 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_prefer_update_latest(selected)
             elif self.cfg.rerank_mode == "linear":
                 chosen = (
-                    _rerank_linear(selected, self._linear_model, question=row.get("question", ""), key=key)
+                    _rerank_linear(
+                        selected,
+                        self._linear_model,
+                        question=row.get("question", ""),
+                        key=key,
+                        step_bucket=self.cfg.step_bucket,
+                        linear_tie_break=self.cfg.linear_tie_break,
+                        linear_tie_eps=self.cfg.linear_tie_eps,
+                    )
                     if self._linear_model is not None
                     else None
                 )
@@ -824,6 +938,21 @@ class RetrievalLlamaCppAdapter:
             drop_prob=self.cfg.drop_prob,
             rng=rng,
         )
+        gold_missing = dropped or diag.get("correct_included") is not True
+        if self.cfg.abstain_on_missing and gold_missing:
+            self._last_diag = {
+                "id": row.get("id"),
+                "key": key,
+                **diag,
+                "drop_prob": self.cfg.drop_prob,
+                "dropped_correct": dropped,
+                "order": None,
+                "authority_spoof_rate": self.cfg.authority_spoof_rate,
+                "authority_spoof_count": 0,
+                "gold_missing": True,
+                "abstained": True,
+            }
+            return self._empty_output()
         order_applied = None
         if self.cfg.order == "shuffle" and len(selected) > 1:
             shuffle_rng = random.Random(self.cfg.order_seed ^ hash(row.get("id", "")))
@@ -848,6 +977,8 @@ class RetrievalLlamaCppAdapter:
             "order": order_applied,
             "authority_spoof_rate": self.cfg.authority_spoof_rate,
             "authority_spoof_count": spoofed_count,
+            "gold_missing": gold_missing,
+            "abstained": False,
         }
         if not selected:
             return self._answerer.predict(row, protocol=protocol)
@@ -871,7 +1002,15 @@ class RetrievalLlamaCppAdapter:
                 chosen = _rerank_prefer_update_latest(selected)
             elif self.cfg.rerank_mode == "linear":
                 chosen = (
-                    _rerank_linear(selected, self._linear_model, question=row.get("question", ""), key=key)
+                    _rerank_linear(
+                        selected,
+                        self._linear_model,
+                        question=row.get("question", ""),
+                        key=key,
+                        step_bucket=self.cfg.step_bucket,
+                        linear_tie_break=self.cfg.linear_tie_break,
+                        linear_tie_eps=self.cfg.linear_tie_eps,
+                    )
                     if self._linear_model is not None
                     else None
                 )
@@ -944,7 +1083,23 @@ class RetrievalLlamaCppAdapter:
             value = selected_entry.get("value")
             return {"value": value, "support_ids": [selected_entry["uid"]]}
         row_for_adapter = {**row, "book": mini_book}
-        return self._answerer.predict(row_for_adapter, protocol=protocol)
+        pred = self._answerer.predict(row_for_adapter, protocol=protocol)
+        if not isinstance(pred, dict):
+            return pred
+        if self.cfg.copy_clamp and selected_entry is not None:
+            matches = _value_is_substring(
+                predicted=pred.get("value"),
+                entry_value=selected_entry.get("value"),
+            )
+            if not matches:
+                pred = {**pred, "value": None}
+            if self._last_diag is not None:
+                self._last_diag = {
+                    **self._last_diag,
+                    "copy_clamp": True,
+                    "copy_clamped": not matches,
+                }
+        return pred
 
     def take_perf(self) -> dict[str, Any] | None:
         if self._answerer is None:

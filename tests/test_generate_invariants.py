@@ -62,3 +62,36 @@ def test_tail_distractor_steps_reduce_updates() -> None:
         tokens_since = row["meta"].get("tokens_since_update")
         assert tokens_since is not None
         assert tokens_since > 0
+
+
+def test_generate_update_burst_profile_supports_latest_update() -> None:
+    cfg = EpisodeConfig(
+        steps=40,
+        keys=5,
+        queries=8,
+        derived_query_rate=0.0,
+        chapters=2,
+        distractor_rate=0.3,
+        clear_rate=0.1,
+        twins=False,
+        distractor_profile="update_burst",
+        state_mode="kv",
+    )
+    rows = generate_dataset(seed=321, episodes=1, cfg=cfg)
+    assert len(rows) == cfg.queries
+
+    updates = parse_updates(rows[0]["document"])
+    assert len(updates) == cfg.steps
+
+    for row in rows:
+        key = row["meta"]["key"]
+        gold = row["gold"]
+        last_uid = None
+        last_value = None
+        for e in updates:
+            if e["key"] == key:
+                last_uid = e["uid"]
+                last_value = e["value"]
+
+        assert gold["support_id"] == last_uid
+        assert gold["value"] == last_value

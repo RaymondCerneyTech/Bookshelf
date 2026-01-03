@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--note-penalty", type=float, default=0.0)
     parser.add_argument("--wrong-update-penalty", type=float, default=0.0)
     parser.add_argument("--spoof-penalty", type=float, default=0.0)
+    parser.add_argument("--step-bucket", type=int, default=None)
     return parser.parse_args()
 
 
@@ -55,9 +57,15 @@ def _build_examples(path: Path) -> list[dict[str, object]]:
 
 
 def _score_candidates(
-    candidates: list[dict[str, object]], weights: list[float], *, question: str, key: str
+    candidates: list[dict[str, object]],
+    weights: list[float],
+    *,
+    question: str,
+    key: str,
+    step_bucket: int,
 ) -> list[float]:
-    max_step = max(int(candidate.get("step", 0)) for candidate in candidates)
+    step_bucket = max(1, int(step_bucket))
+    max_step = max(int(candidate.get("step", 0)) // step_bucket for candidate in candidates)
     scores: list[float] = []
     for index, candidate in enumerate(candidates):
         feats = _linear_features(
@@ -66,6 +74,7 @@ def _score_candidates(
             index=index,
             total=len(candidates),
             max_step=max_step,
+            step_bucket=step_bucket,
             question=question,
             key=key,
         )
@@ -73,13 +82,19 @@ def _score_candidates(
     return scores
 
 
-def _selection_rate(rows: list[dict[str, object]], weights: list[float]) -> float:
+def _selection_rate(rows: list[dict[str, object]], weights: list[float], *, step_bucket: int) -> float:
     if not rows:
         return 0.0
     correct = 0
     for row in rows:
         candidates = row.get("candidates") or []
-        scores = _score_candidates(candidates, weights, question=row.get("question", ""), key=row.get("key", ""))
+        scores = _score_candidates(
+            candidates,
+            weights,
+            question=row.get("question", ""),
+            key=row.get("key", ""),
+            step_bucket=step_bucket,
+        )
         best_idx = max(range(len(scores)), key=lambda i: scores[i])
         if candidates[best_idx].get("uid") == row.get("correct_uid"):
             correct += 1
@@ -89,6 +104,15 @@ def _selection_rate(rows: list[dict[str, object]], weights: list[float]) -> floa
 def main() -> int:
     args = parse_args()
     rng = random.Random(args.seed)
+
+    step_bucket_env = os.getenv("GOLDEVIDENCEBENCH_RETRIEVAL_STEP_BUCKET", "1")
+    step_bucket = args.step_bucket
+    if step_bucket is None:
+        try:
+            step_bucket = int(step_bucket_env)
+        except ValueError:
+            step_bucket = 1
+    step_bucket = max(1, int(step_bucket))
 
     examples = _build_examples(args.data)
     if not examples:
@@ -105,9 +129,15 @@ def main() -> int:
         rng.shuffle(train_rows)
         for row in train_rows:
             candidates = row.get("candidates") or []
-            scores = _score_candidates(candidates, weights, question=row.get("question", ""), key=row.get("key", ""))
+            scores = _score_candidates(
+                candidates,
+                weights,
+                question=row.get("question", ""),
+                key=row.get("key", ""),
+                step_bucket=step_bucket,
+            )
             probs = _softmax(scores)
-            max_step = max(int(candidate.get("step", 0)) for candidate in candidates)
+            max_step = max(int(candidate.get("step", 0)) // step_bucket for candidate in candidates)
             for index, candidate in enumerate(candidates):
                 feats = _linear_features(
                     entry=candidate,
@@ -115,6 +145,7 @@ def main() -> int:
                     index=index,
                     total=len(candidates),
                     max_step=max_step,
+                    step_bucket=step_bucket,
                     question=row.get("question", ""),
                     key=row.get("key", ""),
                 )
@@ -131,8 +162,8 @@ def main() -> int:
                 for j, feat in enumerate(feats):
                     weights[j] -= args.lr * error * feat
 
-    train_rate = _selection_rate(train_rows, weights)
-    test_rate = _selection_rate(test_rows, weights)
+    train_rate = _selection_rate(train_rows, weights, step_bucket=step_bucket)
+    test_rate = _selection_rate(test_rows, weights, step_bucket=step_bucket)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -147,6 +178,7 @@ def main() -> int:
             "epochs": args.epochs,
             "lr": args.lr,
             "note_penalty": args.note_penalty,
+            "step_bucket": step_bucket,
         },
     }
     args.out.write_text(json.dumps(payload, indent=2), encoding="utf-8")

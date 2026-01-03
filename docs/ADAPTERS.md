@@ -29,16 +29,22 @@ Use `GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_SPOOF_RATE` (0-1) to flip NOTE/UPDATE
 `GOLDEVIDENCEBENCH_RETRIEVAL_AUTHORITY_SPOOF_SEED` for deterministic spoofing by row id.
 Use `GOLDEVIDENCEBENCH_RETRIEVAL_ORDER=shuffle|gold_first|gold_middle|gold_last` (and optional
 `GOLDEVIDENCEBENCH_RETRIEVAL_ORDER_SEED`) to control ordering and test positional bias under ambiguity.
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_STEP_BUCKET` to coarsen step numbers for selection features (1 = no coarsening).
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_QUERY_SANDWICH=1` to repeat the question before and after the
 candidate ledger lines (query sandwich mitigation).
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_PICK_THEN_ANSWER=1` to force a two-step flow: pick a support_id
 first, then answer using only that line.
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_COPY_CLAMP=1` to require the answer value be an exact substring of the selected line;
+if not, it returns null.
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_RERANK=latest_step|last_occurrence|prefer_set_latest|linear` to deterministically
 choose a candidate before answering (non-LLM selector baseline). For `linear`, also set
 `GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_MODEL` to the JSON model file from `train_selector_linear.py`.
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_TIE_BREAK=latest_step` (and optionally `GOLDEVIDENCEBENCH_RETRIEVAL_LINEAR_TIE_EPS`) to prefer newer steps when linear scores are close.
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_SELECTOR_ONLY=1` to skip answer generation and emit only `support_ids`.
 Use selection metrics (`gold_present_rate`, `selection_rate`) for speed-focused iterations; value accuracy is not meaningful
 in selector-only mode.
+Set `GOLDEVIDENCEBENCH_RETRIEVAL_ABSTAIN_ON_MISSING=1` to emit an empty prediction when gold is missing
+(use with `GOLDEVIDENCEBENCH_RETRIEVAL_DROP_PROB` to calibrate abstain precision/recall).
 
 Retrieval order bias (example, k=4, s3q16, kv/standard, gold always present):
 

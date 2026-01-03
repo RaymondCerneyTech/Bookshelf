@@ -78,6 +78,7 @@ def _cmd_generate(ns: argparse.Namespace) -> int:
         distractor_profile=ns.distractor_profile,
         state_mode=ns.state_mode,
         note_rate=ns.note_rate,
+        update_burst_rate=ns.update_burst_rate,
     )
     rows = generate_dataset(seed=ns.seed, episodes=ns.episodes, cfg=cfg)
     write_jsonl(ns.out, rows)
@@ -325,6 +326,7 @@ def _cmd_sweep(ns: argparse.Namespace) -> int:
         "tail_distractor_steps": ns.tail_distractor_steps,
         "clear_rate": ns.clear_rate,
         "note_rate": ns.note_rate,
+        "update_burst_rate": ns.update_burst_rate,
         "require_citations": require_citations,
         "twins": ns.twins,
         "state_modes": ns.state_modes,
@@ -354,6 +356,7 @@ def _cmd_sweep(ns: argparse.Namespace) -> int:
                             tail_distractor_steps=ns.tail_distractor_steps,
                             clear_rate=ns.clear_rate,
                             note_rate=ns.note_rate,
+                            update_burst_rate=ns.update_burst_rate,
                             require_citations=require_citations,
                             distractor_profile=profile,
                             state_mode=mode,
@@ -511,8 +514,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="NOTE rate for kv_commentary (non-authoritative ledger lines).",
     )
     g.add_argument(
+        "--update-burst-rate",
+        type=float,
+        default=float(get_env("UPDATE_BURST_RATE", "0.25")),
+        help="Rate for update_burst near-miss UPDATE scheduling.",
+    )
+    g.add_argument(
         "--distractor-profile",
-        choices=["easy", "standard", "adversarial", "instruction", "instruction_suite"],
+        choices=["easy", "standard", "adversarial", "instruction", "instruction_suite", "note_camouflage", "note_camouflage_suite", "update_burst"],
         default="instruction",
         help="Adversarial adds stale-echo distractors; instruction injects spec-violating lines.",
     )
@@ -630,6 +639,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.12,
         help="NOTE rate for kv_commentary (non-authoritative ledger lines).",
+    )
+    s.add_argument("--update-burst-rate", type=float, default=float(get_env("UPDATE_BURST_RATE", "0.25")),
+        help="Rate for update_burst near-miss UPDATE scheduling.",
     )
     s.add_argument("--state-modes", type=str, default="kv,kv_commentary,counter,set,relational")
     s.add_argument("--distractor-profiles", type=str, default="instruction,adversarial")

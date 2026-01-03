@@ -4,6 +4,7 @@ import random
 
 from goldevidencebench.adapters.retrieval_llama_cpp_adapter import (
     _LINEAR_FEATURE_ORDER,
+    _linear_features,
     _apply_authority_spoof,
     _apply_drop_with_rng,
     _apply_order,
@@ -144,6 +145,34 @@ def test_apply_drop_with_rng_removes_correct() -> None:
     assert all(e["uid"] != "U000001" for e in dropped)
 
 
+def test_abstain_on_missing_returns_empty(monkeypatch) -> None:
+    monkeypatch.setenv("GOLDEVIDENCEBENCH_RETRIEVAL_SELECTOR_ONLY", "1")
+    monkeypatch.setenv("GOLDEVIDENCEBENCH_RETRIEVAL_ABSTAIN_ON_MISSING", "1")
+    monkeypatch.setenv("GOLDEVIDENCEBENCH_RETRIEVAL_DROP_PROB", "1")
+    monkeypatch.setenv("GOLDEVIDENCEBENCH_RETRIEVAL_WRONG_TYPE", "other_key")
+    monkeypatch.setenv("GOLDEVIDENCEBENCH_RETRIEVAL_K", "1")
+    from goldevidencebench.adapters.retrieval_llama_cpp_adapter import RetrievalLlamaCppAdapter
+
+    cfg = EpisodeConfig(
+        steps=8,
+        keys=3,
+        queries=3,
+        derived_query_rate=0.0,
+        chapters=1,
+        distractor_rate=0.0,
+        twins=False,
+        distractor_profile="standard",
+        state_mode="kv",
+    )
+    rows = generate_dataset(seed=11, episodes=1, cfg=cfg)
+    adapter = RetrievalLlamaCppAdapter()
+    pred = adapter.predict(rows[0], protocol="closed_book")
+    assert pred["support_ids"] == []
+    diag = adapter.take_diag()
+    assert diag is not None
+    assert diag.get("abstained") is True
+
+
 def test_order_gold_last_moves_correct_to_end() -> None:
     selected = [{"uid": "U000001"}, {"uid": "U000002"}, {"uid": "U000003"}]
     ordered, applied = _apply_order(selected=selected, correct_uid="U000002", order="gold_last")
@@ -164,6 +193,38 @@ def test_order_gold_middle_inserts_in_center() -> None:
     assert ordered[len(ordered) // 2]["uid"] == "U000003"
 
 
+
+
+
+def test_linear_features_step_bucket_coarsens_steps() -> None:
+    entries = [
+        {"uid": "U1", "step": 10, "op": "SET", "key": "A", "value": "alpha"},
+        {"uid": "U2", "step": 14, "op": "SET", "key": "A", "value": "beta"},
+    ]
+    max_step = max(int(entry["step"]) // 5 for entry in entries)
+    feats_1 = _linear_features(
+        entry=entries[0],
+        entries=entries,
+        index=0,
+        total=len(entries),
+        max_step=max_step,
+        step_bucket=5,
+        question="What is A?",
+        key="A",
+    )
+    feats_2 = _linear_features(
+        entry=entries[1],
+        entries=entries,
+        index=1,
+        total=len(entries),
+        max_step=max_step,
+        step_bucket=5,
+        question="What is A?",
+        key="A",
+    )
+    assert feats_1[1] == feats_2[1]
+    assert feats_1[3] == feats_2[3]
+    assert feats_1[4] == feats_2[4]
 def test_rerank_last_occurrence_picks_tail() -> None:
     entries = [
         {"uid": "U000001", "step": 2},
