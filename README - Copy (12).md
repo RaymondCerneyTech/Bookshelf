@@ -783,48 +783,37 @@ Stitching patterns (composable fixes):
 
 ## Current plan (update_burst wall, 2026-01)
 
-Stress regime (linear + step_bucket=10 + k=16) with seeds=3 fails the wrong_update_rate <= 0.10 gate even at
-update_burst_rate=0.02. That means this diagnostic regime is beyond the 0.10 gate for any nonzero burst rate.
-The earlier 1-seed wall (~0.18-0.19) was variance.
+Full-pipeline stress run (linear rerank + step_bucket=10 + k=16) shows a wrong-UPDATE wall between 0.18 and 0.19 (threshold=0.10).
+Full-pipeline runs: `runs/wall_update_burst_full_linear_bucket10_20260104_180252` (stress) and
+`runs/wall_update_burst_full_linear_bucket10_pin_20260104_180252` (pin).
 
-Seeds=3 pin runs used to locate the wall (full pipeline):
-
-- `runs/wall_update_burst_full_linear_bucket10_pin_20260104_200253_s3` (0.175-0.19)
-- `runs/wall_update_burst_full_linear_bucket10_pin_20260104_215915_s3_low` (0.10-0.17)
-- `runs/wall_update_burst_full_linear_bucket10_pin_20260104_233152_s3_micro` (0.02-0.08)
-
-Micro sweep (seeds=3; full pipeline, linear + step_bucket=10 + k=16):
+Stress sweep (full pipeline, linear + step_bucket=10 + k=16):
 
 | update_burst_rate | selection_rate | wrong_update_rate | value_acc |
 | --- | --- | --- | --- |
-| 0.02 | 0.8750 | 0.1250 | 0.8750 |
-| 0.04 | 0.7708 | 0.2292 | 0.7708 |
-| 0.06 | 0.8125 | 0.1875 | 0.8125 |
-| 0.08 | 0.7500 | 0.2500 | 0.7500 |
+| 0.205 | 0.8750 | 0.1250 | 0.8750 |
+| 0.209 | 0.8750 | 0.1250 | 0.8750 |
+| 0.22 | 0.5625 | 0.4375 | 0.5625 |
+| 0.24 | 0.6875 | 0.3125 | 0.6875 |
 
-Production gate (prefer_update_latest, k=8, full pipeline, seeds=3):
-
-- `runs/update_burst_prefer_update_latest_gate_20260105_025033` (0.25, 0.35, 0.45)
-- `runs/update_burst_prefer_update_latest_gate_20260105_133108_full_s3` (0.95)
-- `runs/update_burst_prefer_update_latest_gate_20260105_142019_full_s3_099` (0.99)
- - Selector-only quick probe: `runs/update_burst_prefer_update_latest_gate_20260105_152002_quick5` (1.0; value_acc not meaningful)
-Stable gate path (frozen for checks): `runs/release_gates/update_burst_prefer_update_latest_k8_rate0.99`.
+Pin sweep (full pipeline, same regime):
 
 | update_burst_rate | selection_rate | wrong_update_rate | value_acc |
 | --- | --- | --- | --- |
-| 0.25 | 1.0000 | 0.0000 | 1.0000 |
-| 0.35 | 1.0000 | 0.0000 | 1.0000 |
-| 0.45 | 1.0000 | 0.0000 | 1.0000 |
-| 0.95 | 1.0000 | 0.0000 | 1.0000 |
-| 0.99 | 1.0000 | 0.0000 | 1.0000 |
+| 0.18 | 0.9375 | 0.0625 | 0.9375 |
+| 0.19 | 0.6875 | 0.3125 | 0.6875 |
+| 0.195 | 0.8750 | 0.1250 | 0.8750 |
+| 0.20 | 0.8125 | 0.1875 | 0.8125 |
 
 Selector-only auto-pin run (diagnostic only; value_acc not meaningful): `runs/wall_update_burst_20260104_190551`.
 
+Contrast: prefer_update_latest stayed perfect at 0.205/0.209 (runs: `runs/wall_update_burst_confirm_20260104`), so the linear + bucket10 regime is a stress diagnostic, not the production default.
+
 Plan going forward:
 
-1) Keep the linear+bucket10 stress regime as diagnostic only (always beyond the 0.10 gate).
-2) Use the prefer_update_latest 0.99 full-pipeline run above as the production gate in `configs/usecase_checks.json`.
-3) Wall not found up to 0.99; treat the production default as robust in update_burst at this scale.
+1) Record the stress ceiling as update_burst_rate <= 0.18 for the linear+bucket10+k16 full pipeline (1 seed; re-run with seeds=3 for tighter bounds).
+2) Keep prefer_update_latest as the production default; treat linear+bucket10 as a diagnostic wall finder.
+3) If you want tighter release gating, re-run the pin sweep with seeds=3 and update `configs/usecase_checks.json` to the new pinned run.
 
 Canonical wall sweep commands (frozen):
 
@@ -841,74 +830,6 @@ Canonical wall sweep commands (frozen):
   -OutRoot "runs\wall_update_burst_full_linear_bucket10_pin_20260104_180252" `
   -Rates 0.18,0.19,0.195,0.20 `
   -FindWall:$true
-```
-
-## Computer-use agents (why this benchmark maps)
-
-Computer-use agents share the same selection-under-ambiguity failure mode, but the domains are not identical.
-This benchmark reuses the selection/evidence discipline; it does not solve perception or planning.
-
-In a UI, the agent must choose one action among many plausible candidates and update state correctly.
-The most damaging error is a wrong action with no detection (silent failure), so the extension should include
-a post-action verification contract: did the expected UI state delta occur?
-
-Minimal extension to cover UI agents:
-
-- **Adapter**: convert the accessibility tree/DOM into a candidate list (actions), not pixels.
-- **Gold**: the correct action for the step.
-- **Distractors**: same-label buttons, popups, overlays, and near-miss targets.
-- **Post-action verification**: capture the expected UI delta and mark mismatches for abstain/rollback/alert.
-- **Metrics**: `gold_present_rate`, `selection_rate`, UI wrong action rate (same as `wrong_update_rate`),
-  post-action verify rate, and abstain precision/recall.
-
-First milestone (highest leverage):
-
-- **same_label profile**: duplicate "Next/Continue/Save" buttons, measure selection vs ambiguity.
-- **Wall sweep**: increase duplicates until `wrong_update_rate` crosses a release gate.
-- **Gate**: declare "safe up to X ambiguity; abstain beyond that."
-
-If this lands, you get the same decomposition you already use for text logs, but applied to real UI actions:
-retrieval vs selection vs abstain, with a concrete, publishable wall.
-
-Adoption hook (CI gates):
-
-- `selection_rate` floor under `same_label`.
-- `wrong_update_rate` ceiling under `same_label`.
-- post-action verify rate floor under confusers.
-- `abstain_precision/recall` under missing-gold sweeps.
-- `gold_present_rate` for retriever coverage.
-
-Adapter checklist (minimal):
-
-- Extract action candidates from the accessibility tree/DOM (click, type, select).
-- Emit stable `candidate_id` and `action_type` for each candidate.
-- Provide gold `candidate_id` per step (authoritative).
-- Log distractor metadata (label similarity, bbox overlap, z-order, modal scope).
-- Record the expected post-action UI delta and the verification result.
-- Support `abstain` when no candidate meets confidence or gold is missing.
-
-Minimal UI candidate schema (example):
-
-```json
-{
-  "id": "step_0007",
-  "candidates": [
-    {
-      "candidate_id": "btn_save_primary",
-      "action_type": "click",
-      "label": "Save",
-      "role": "button",
-      "app_path": "Settings > Profile",
-      "bbox": [120, 440, 80, 28],
-      "visible": true,
-      "enabled": true,
-      "modal_scope": "profile_dialog"
-    }
-  ],
-  "gold": {
-    "candidate_id": "btn_save_primary"
-  }
-}
 ```
 
 ## Impact / use-case profiles
