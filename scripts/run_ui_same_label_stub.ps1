@@ -36,4 +36,4 @@ Remove-Item Env:\GOLDEVIDENCEBENCH_UI_SELECTION_SEED -ErrorAction SilentlyContin
 python .\scripts\summarize_ui_fixture.py --fixture $FixturePath --out $summaryOut
 Write-Host "UI gate: $gateOut"
 Write-Host "UI summary: $summaryOut"
-Write-Host "Adapter not implemented yet. Use this fixture to build the UI adapter."
+Write-Host "UI adapter available: see docs/ADAPTERS.md for the Llama UI adapter."

@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    from llama_cpp import Llama, LlamaGrammar
+except ImportError as exc:  # pragma: no cover - optional dependency
+    raise ImportError("llama_cpp not installed; install via `pip install llama-cpp-python`") from exc
+
+from goldevidencebench.ui_policy import preselect_candidates
+from goldevidencebench.ui_prompt import build_ui_prompt
+from goldevidencebench.util import get_env
+
+UI_JSON_GRAMMAR = r"""
+root   ::= ws "{" ws "\"value\"" ws ":" ws value ws "," ws "\"support_ids\"" ws ":" ws array ws "}" ws
+value  ::= string | "null"
+array  ::= "[" ws "]"
+string ::= "\"" chars "\""
+chars  ::= (char)*
+char   ::= [^"\\] | escape
+escape ::= "\\" ["\\/bfnrt]
+ws     ::= [ \t\r\n]*
+"""
+
+
+class UILlamaCppAdapter:
+    """
+    UI adapter that selects a candidate_id using llama-cpp.
+    Model path is taken from:
+    - env GOLDEVIDENCEBENCH_UI_MODEL
+    - or env GOLDEVIDENCEBENCH_MODEL
+    - or constructor argument model_path
+    """
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        n_ctx: int = 2048,
+        n_threads: int | None = None,
+        max_output_tokens: int = 64,
+    ) -> None:
+        model_path = model_path or get_env("UI_MODEL") or get_env("MODEL")
+        if not model_path:
+            raise ValueError("Set GOLDEVIDENCEBENCH_MODEL or GOLDEVIDENCEBENCH_UI_MODEL to a GGUF model path.")
+        if not Path(model_path).exists():
+            raise FileNotFoundError(model_path)
+        self.llm = Llama(model_path=model_path, n_ctx=n_ctx, n_threads=n_threads)
+        self.max_output_tokens = max_output_tokens
+        self.grammar = _load_grammar(UI_JSON_GRAMMAR)
+        self.filter_overlay = _env_flag("UI_OVERLAY_FILTER", default="0")
+        self.preselect_rules = _env_flag("UI_PRESELECT_RULES", default="0")
+
+    def predict(self, row: dict[str, Any], *, protocol: str = "ui") -> dict[str, Any]:
+        if protocol != "ui":
+            raise ValueError("UILlamaCppAdapter supports protocol='ui' only.")
+
+        candidates = row.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("UI row must include a candidates list.")
+
+        candidates = preselect_candidates(
+            row,
+            candidates,
+            apply_overlay_filter=self.filter_overlay,
+            apply_rules=self.preselect_rules,
+        )
+
+        candidate_ids = [
+            candidate.get("candidate_id")
+            for candidate in candidates
+            if isinstance(candidate, dict) and isinstance(candidate.get("candidate_id"), str)
+        ]
+        prompt = build_ui_prompt(row, candidates)
+        text = _generate_text(self, prompt=prompt)
+        parsed = _parse_json(text)
+        selected = _normalize_value(parsed.get("value") if parsed else None)
+        if selected not in candidate_ids:
+            selected = None
+        return {"value": selected, "support_ids": []}
+
+
+def create_adapter() -> UILlamaCppAdapter:
+    return UILlamaCppAdapter()
+
+
+def _load_grammar(grammar: str) -> LlamaGrammar | None:
+    try:
+        return LlamaGrammar.from_string(grammar)
+    except Exception:
+        return None
+
+
+def _normalize_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, bool)):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value else None
+
+
+def _parse_json(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _env_flag(key: str, *, default: str = "0") -> bool:
+    value = (get_env(key, default) or default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _generate_text(self: UILlamaCppAdapter, *, prompt: str) -> str:
+    print("[goldevidencebench] ui prompt", file=sys.stderr)
+    grammar = self.grammar
+    if grammar is not None and hasattr(self.llm, "create_completion"):
+        resp = self.llm.create_completion(
+            prompt=prompt,
+            max_tokens=self.max_output_tokens,
+            grammar=grammar,
+        )
+        return resp["choices"][0]["text"]
+    try:
+        resp = self.llm(
+            prompt,
+            max_tokens=self.max_output_tokens,
+            response_format={"type": "json_object"},
+        )
+        return resp["choices"][0]["text"]
+    except TypeError:
+        if hasattr(self.llm, "create_completion"):
+            resp = self.llm.create_completion(
+                prompt=prompt,
+                max_tokens=self.max_output_tokens,
+                grammar=grammar,
+            )
+            return resp["choices"][0]["text"]
+        resp = self.llm(prompt, max_tokens=self.max_output_tokens)
+        return resp["choices"][0]["text"]

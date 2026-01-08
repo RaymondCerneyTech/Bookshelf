@@ -997,8 +997,6 @@ The UI Llama adapter uses `instruction` / `goal` / `question` fields on each row
 You can override the model path with `GOLDEVIDENCEBENCH_UI_MODEL`.
 Set `GOLDEVIDENCEBENCH_UI_OVERLAY_FILTER=1` to drop popup/overlay candidates unless the row sets
 `allow_overlay=true` (or `meta.allow_overlay=true`).
-Set `GOLDEVIDENCEBENCH_UI_PRESELECT_RULES=1` to apply deterministic pre-selection based on instruction cues
-(main page vs modal/dialog, primary/secondary, top/bottom, left/right) before the LLM chooses.
 
 Run the CLI command (same adapter, JSON output):
 

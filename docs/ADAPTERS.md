@@ -20,6 +20,13 @@ Set `GOLDEVIDENCEBENCH_BUILDER_MODE` to `heuristic`, `llm_fullscan` (default), o
 Set `GOLDEVIDENCEBENCH_BUILDER_PER_KEY_LLM=0` to disable per-key LLM calls (deterministic fallback).
 Retrieval-first answerer (use only the latest ledger entry for the key): `goldevidencebench.adapters.retrieval_llama_cpp_adapter:create_adapter`.
 UI fixture stub adapter (fixture-based candidate selection for computer-use scaffolding): `goldevidencebench.adapters.ui_fixture_adapter:create_adapter`.
+UI Llama adapter (UI candidate selection from row fields): `goldevidencebench.adapters.ui_llama_cpp_adapter:create_adapter`.
+Set `GOLDEVIDENCEBENCH_UI_MODEL` (or `GOLDEVIDENCEBENCH_MODEL`) to a GGUF path. It reads
+`instruction`/`goal`/`question` fields on the row (or `meta`) to guide selection.
+Set `GOLDEVIDENCEBENCH_UI_OVERLAY_FILTER=1` to drop popup/overlay candidates unless the row sets
+`allow_overlay=true` (or `meta.allow_overlay=true`).
+Set `GOLDEVIDENCEBENCH_UI_PRESELECT_RULES=1` to apply a deterministic pre-selector that uses
+instruction cues (main page, modal/dialog, primary/secondary, top/bottom, left/right) before the LLM chooses.
 Env var names use the `GOLDEVIDENCEBENCH_` prefix.
 Set `GOLDEVIDENCEBENCH_RETRIEVAL_K` to include top-k latest entries for the key (default 1). Set
 `GOLDEVIDENCEBENCH_RETRIEVAL_WRONG_TYPE` to `none`, `same_key`, or `other_key` to inject a wrong line for robustness
